@@ -53,6 +53,64 @@ fn negotiated(session: &mut Session) -> SessionUpdate {
     config.payload[0] = 2;
     session.receive(&config.encode().unwrap(), 1)
 }
+
+#[test]
+fn peer_version_does_not_have_to_echo_the_requested_version() {
+    for version in [[0, 0, 1], [1, 0, 1], [2, 0, 0], [255, 255, 255]] {
+        let mut session = Session::new(options()).unwrap();
+        assert_eq!(session.start(0).state, "negotiating");
+        let mut config = frame::parse_frame(
+            &frame::SessionConfig {
+                version,
+                ..frame::SessionConfig::default()
+            }
+            .build(),
+            64512,
+        )
+        .unwrap();
+        config.payload[0] = 2;
+        let update = session.receive(&config.encode().unwrap(), 1);
+        assert_eq!(update.state, "awaiting_nonce");
+        assert!(update.error.is_none());
+        let diagnostic = update
+            .events
+            .iter()
+            .find(|event| event.kind == "session_config")
+            .unwrap();
+        assert_eq!(diagnostic.data, json!({"peer_version":version}));
+        assert!(diagnostic
+            .message
+            .contains(&format!("{}.{}.{}", version[0], version[1], version[2])));
+        let outgoing = frames(&update);
+        assert_eq!(outgoing.len(), 1);
+        let cmd = Message::parse(outgoing[0].data().unwrap().bytes).unwrap();
+        assert_eq!(cmd.uint(1).unwrap(), Some(1));
+        assert_eq!(cmd.uint(2).unwrap(), Some(26));
+    }
+}
+
+#[test]
+fn peer_version_with_an_invalid_length_fails_before_nonce_exchange() {
+    for version in [&[][..], &[1, 0][..], &[1, 0, 0, 0][..]] {
+        let mut session = Session::new(options()).unwrap();
+        session.start(0);
+        let mut payload = vec![2, 1, version.len() as u8, 0];
+        payload.extend_from_slice(version);
+        let config = frame::build_frame(frame::TYPE_SESSION_CONFIG, 0, &payload).unwrap();
+        let update = session.receive(&config, 1);
+        assert_eq!(update.state, "failed");
+        assert_eq!(
+            update.error.as_deref(),
+            Some("invalid SPP V2 session version length")
+        );
+        assert!(update.outbound.is_empty());
+        assert!(!update
+            .events
+            .iter()
+            .any(|event| event.kind == "session_config"));
+    }
+}
+
 fn authenticate(session: &mut Session) -> SessionUpdate {
     let nonce = negotiated(session);
     assert_eq!(nonce.state, "awaiting_nonce");

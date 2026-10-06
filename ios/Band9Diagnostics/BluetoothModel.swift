@@ -982,6 +982,9 @@ extension BluetoothModel {
 
     private func handleSessionEvent(_ event: SessionReply.Event) {
         switch event.kind {
+        case "session_config":
+            log(event.message)
+            prepareExport()
         case "pairing_required":
             authenticationTimeoutSeconds = 120
             sessionStartedAt = ProcessInfo.processInfo.systemUptime
@@ -1009,10 +1012,12 @@ extension BluetoothModel {
             if let percent = event.data["percent"]?.number, percent >= 0, percent <= 100 {
                 batteryLevel = Int(percent)
                 log("已更新手环电量。")
+                prepareExport()
             }
         case "device_info":
             firmware = event.data["firmware"]?.string
             modelName = event.data["model"]?.string
+            prepareExport()
         case "health_file":
             guard let device = selectedDevice?.id else { return }
             do {

@@ -485,6 +485,7 @@ impl Session {
         }
         let mut offset = 1;
         let mut seen = HashSet::new();
+        let mut peer_version = None;
         while offset < payload.len() {
             if payload.len() - offset < 3 {
                 return Err("truncated session configuration TLV".into());
@@ -501,7 +502,14 @@ impl Session {
             let value = &payload[offset..offset + size];
             offset += size;
             match key {
-                1 if value != [1, 0, 0] => return Err("unsupported SPP V2 session version".into()),
+                1 => {
+                    // This is the peer's advertised version, not an echo of our
+                    // request. Reference clients accept any three-byte value.
+                    if value.len() != 3 {
+                        return Err("invalid SPP V2 session version length".into());
+                    }
+                    peer_version = Some([value[0], value[1], value[2]]);
+                }
                 2 => {
                     if value.len() != 2 {
                         return Err("invalid peer packet size".into());
@@ -527,6 +535,17 @@ impl Session {
                 _ => {}
             }
         }
+        let config_message = match peer_version {
+            Some([major, minor, patch]) => {
+                format!("已接收手环通信配置，版本 {major}.{minor}.{patch}")
+            }
+            None => "已接收手环通信配置，未提供版本字段".into(),
+        };
+        out.event(
+            "session_config",
+            config_message,
+            json!({"peer_version":peer_version}),
+        );
         self.pending = None;
         self.state = "awaiting_nonce";
         self.send_task(Task::Nonce, now, out)?;
