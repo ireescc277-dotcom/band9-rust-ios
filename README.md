@@ -2,6 +2,8 @@
 
 小米手环 9 自用客户端的第一阶段：**Rust 协议核心 + 原生 iOS 蓝牙诊断 App**。在 Windows 编辑代码和测试核心，通过 GitHub Actions 的 macOS runner 构建 iPhone 安装包。
 
+首个构建已经[通过 GitHub Actions](https://github.com/ireescc277-dotcom/band9-rust-ios/actions/runs/37498857344)：26 项 Rust 测试通过，Rust/Swift 编译链接成功，生成 iOS 17+ 的 arm64 待签名 IPA。对应应用源码提交 `cdbdf95`；签名安装及手环实机连接尚未验证。
+
 ## 当前能做什么
 
 - 前台扫描 BLE，手动选择设备并连接。
@@ -67,6 +69,8 @@ cargo test --workspace --locked
 - 真机测试阶段才确认该手环的通道、固件行为和系统权限表现。
 
 后续顺序：完成实际通道确认 → 接入设备密钥和认证 → 保留并解析健康原始文件 → Apple Health → 后台恢复。
+
+已核实的通道、密钥获取限制、密码参数和接入验收步骤见 [后续协议接入](docs/PROTOCOL.md)。
 
 ## 协议资料
 
