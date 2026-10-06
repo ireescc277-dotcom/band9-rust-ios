@@ -533,3 +533,389 @@ fn exhausted_directory_retries_end_sync_with_failure_event() {
     assert!(ended.events.iter().any(|e| e.kind == "sync_failed"));
     assert!(ended.events.iter().any(|e| e.kind == "sync_complete"));
 }
+
+fn watchface_list(faces: &[(&str, &str, bool, bool)]) -> Vec<u8> {
+    let mut list = Vec::new();
+    for (id, name, active, can_delete) in faces {
+        let mut face = Vec::new();
+        proto::bytes(&mut face, 1, id.as_bytes());
+        proto::bytes(&mut face, 2, name.as_bytes());
+        proto::uint(&mut face, 3, u32::from(*active));
+        proto::uint(&mut face, 4, u32::from(*can_delete));
+        proto::uint(&mut face, 11, 123); // Unknown fields are not interpreted.
+        proto::bytes(&mut list, 1, &face);
+    }
+    let mut watchface = Vec::new();
+    proto::bytes(&mut watchface, 1, &list);
+    proto::command(4, 0, Some((6, &watchface)))
+}
+
+fn watchface_ack(ack: u32) -> Vec<u8> {
+    let mut watchface = Vec::new();
+    proto::uint(&mut watchface, 4, ack);
+    proto::command(4, 1, Some((6, &watchface)))
+}
+
+fn sent_commands(update: &SessionUpdate) -> Vec<Vec<u8>> {
+    frames(update)
+        .into_iter()
+        .filter(|frame| frame.packet_type() == frame::TYPE_DATA)
+        .map(|frame| ctr_v2(&val("encryption_key"), frame.data().unwrap().bytes).unwrap())
+        .collect()
+}
+
+fn ready_with_faces() -> Session {
+    let mut session = ready();
+    session.request(SessionRequest::Watchfaces, 6);
+    let loaded = session.receive(
+        &peer(
+            &watchface_list(&[("001", "数字", true, false), ("002", "指针", false, true)]),
+            54,
+            true,
+        ),
+        7,
+    );
+    assert!(loaded.events.iter().any(|event| event.kind == "watchfaces"));
+    session
+}
+
+#[test]
+fn watchface_list_preserves_subtype_zero_and_actual_identifiers_names_and_flags() {
+    let mut session = ready();
+    let requested = session.request(SessionRequest::Watchfaces, 6);
+    assert_eq!(sent_commands(&requested), vec![vec![8, 4, 16, 0]]);
+    let loaded = session.receive(
+        &peer(
+            &watchface_list(&[("001", "数字", true, false), ("002", "指针", false, true)]),
+            54,
+            true,
+        ),
+        7,
+    );
+    let data = &loaded
+        .events
+        .iter()
+        .find(|event| event.kind == "watchfaces")
+        .unwrap()
+        .data;
+    assert_eq!(
+        data,
+        &json!({"faces":[
+            {"id":"001","name":"数字","active":true,"can_delete":false},
+            {"id":"002","name":"指针","active":false,"can_delete":true}
+        ]})
+    );
+    assert!(loaded.error.is_none());
+    assert!(sent_commands(&loaded).is_empty());
+}
+
+#[test]
+fn watchface_switch_requires_application_acceptance_and_active_readback() {
+    let mut session = ready_with_faces();
+    let selected = session.request(
+        SessionRequest::SetWatchface {
+            face_id: "002".into(),
+        },
+        8,
+    );
+    let commands = sent_commands(&selected);
+    let command = Message::parse(&commands[0]).unwrap();
+    assert_eq!(command.uint(1).unwrap(), Some(4));
+    assert_eq!(command.uint(2).unwrap(), Some(1));
+    assert_eq!(
+        command
+            .nested(6)
+            .unwrap()
+            .unwrap()
+            .text(2)
+            .unwrap()
+            .as_deref(),
+        Some("002")
+    );
+    let sequence = frames(&selected)
+        .iter()
+        .find(|frame| frame.packet_type() == frame::TYPE_DATA)
+        .unwrap()
+        .sequence;
+    let transport_ack = session.receive(&frame::build_ack(sequence), 9);
+    assert!(!transport_ack
+        .events
+        .iter()
+        .any(|event| event.kind == "watchface_changed"));
+    // An unsolicited/late list while awaiting the set reply cannot complete it.
+    let early_list = session.receive(
+        &peer(
+            &watchface_list(&[("001", "数字", false, false), ("002", "指针", true, true)]),
+            55,
+            true,
+        ),
+        10,
+    );
+    assert!(!early_list
+        .events
+        .iter()
+        .any(|event| event.kind == "watchfaces" || event.kind == "watchface_changed"));
+    let accepted = session.receive(&peer(&watchface_ack(1), 56, true), 11);
+    assert!(accepted
+        .events
+        .iter()
+        .any(|event| event.kind == "watchface_verifying"));
+    assert!(!accepted
+        .events
+        .iter()
+        .any(|event| event.kind == "watchface_changed"));
+    assert_eq!(sent_commands(&accepted), vec![vec![8, 4, 16, 0]]);
+    let confirmed = session.receive(
+        &peer(
+            &watchface_list(&[("001", "数字", false, false), ("002", "指针", true, true)]),
+            57,
+            true,
+        ),
+        12,
+    );
+    assert_eq!(
+        confirmed
+            .events
+            .iter()
+            .find(|event| event.kind == "watchface_changed")
+            .unwrap()
+            .data["face_id"],
+        "002"
+    );
+}
+
+#[test]
+fn watchface_application_rejection_does_not_claim_success_or_request_readback() {
+    for ack in [0, 2] {
+        let mut session = ready_with_faces();
+        session.request(
+            SessionRequest::SetWatchface {
+                face_id: "002".into(),
+            },
+            8,
+        );
+        let rejected = session.receive(&peer(&watchface_ack(ack), 55, true), 9);
+        assert_eq!(rejected.state, "ready");
+        assert!(rejected
+            .events
+            .iter()
+            .any(|event| event.kind == "watchface_failed" && event.data["reason"] == "rejected"));
+        assert!(!rejected
+            .events
+            .iter()
+            .any(|event| event.kind == "watchface_changed"));
+        assert!(sent_commands(&rejected).is_empty());
+        assert_eq!(
+            sent_commands(&session.request(SessionRequest::Battery, 10)),
+            vec![proto::command(2, 1, None)]
+        );
+    }
+}
+
+#[test]
+fn watchface_readback_of_old_active_face_is_not_a_success() {
+    let mut session = ready_with_faces();
+    session.request(
+        SessionRequest::SetWatchface {
+            face_id: "002".into(),
+        },
+        8,
+    );
+    // Even a matching list batched after the set ACK arrives before our readback is sent.
+    let mut batched = peer(&watchface_ack(1), 55, true);
+    batched.extend(peer(
+        &watchface_list(&[("002", "指针", true, true)]),
+        56,
+        true,
+    ));
+    let accepted = session.receive(&batched, 9);
+    assert!(!accepted
+        .events
+        .iter()
+        .any(|event| event.kind == "watchface_changed"));
+    assert_eq!(sent_commands(&accepted), vec![vec![8, 4, 16, 0]]);
+    let old = session.receive(
+        &peer(
+            &watchface_list(&[("001", "数字", true, false), ("002", "指针", false, true)]),
+            57,
+            true,
+        ),
+        10,
+    );
+    assert!(old
+        .events
+        .iter()
+        .any(|event| event.kind == "watchface_failed" && event.data["reason"] == "not_active"));
+    assert!(!old
+        .events
+        .iter()
+        .any(|event| event.kind == "watchface_changed"));
+}
+
+#[test]
+fn unknown_watchface_ids_and_simultaneous_switches_are_rejected_without_writes() {
+    let mut session = ready_with_faces();
+    for id in ["", "999", "002\0"] {
+        let update = session.request(SessionRequest::SetWatchface { face_id: id.into() }, 8);
+        assert!(update.outbound.is_empty());
+        assert!(update
+            .events
+            .iter()
+            .any(|event| event.kind == "watchface_failed" && event.data["reason"] == "not_found"));
+    }
+    session.request(
+        SessionRequest::SetWatchface {
+            face_id: "002".into(),
+        },
+        9,
+    );
+    let busy = session.request(
+        SessionRequest::SetWatchface {
+            face_id: "001".into(),
+        },
+        10,
+    );
+    assert!(busy.outbound.is_empty());
+    assert!(busy
+        .events
+        .iter()
+        .any(|event| event.kind == "watchface_failed" && event.data["reason"] == "busy"));
+}
+
+#[test]
+fn malformed_or_ambiguous_watchface_lists_fail_without_losing_authenticated_session() {
+    let invalid_lists = [
+        watchface_list(&[("001", "a", true, false), ("001", "b", false, true)]),
+        watchface_list(&[("001", "a", true, false), ("002", "b", true, true)]),
+        watchface_list(&[("", "empty identifier", false, false)]),
+        proto::command(4, 0, None),
+    ];
+    for (offset, invalid) in invalid_lists.into_iter().enumerate() {
+        let mut session = ready();
+        session.request(SessionRequest::Watchfaces, 6);
+        let update = session.receive(&peer(&invalid, 54 + offset as u8, true), 7);
+        assert_eq!(update.state, "ready");
+        assert!(update.error.is_some());
+        assert!(update
+            .events
+            .iter()
+            .any(|event| event.kind == "watchface_failed"));
+        assert!(!update.events.iter().any(|event| event.kind == "watchfaces"));
+        assert!(!session
+            .request(SessionRequest::Battery, 8)
+            .outbound
+            .is_empty());
+    }
+}
+
+#[test]
+fn empty_watchface_lists_and_repeated_field_limits_are_handled_explicitly() {
+    let mut session = ready();
+    session.request(SessionRequest::Watchfaces, 6);
+    let empty = session.receive(&peer(&watchface_list(&[]), 54, true), 7);
+    assert_eq!(
+        empty
+            .events
+            .iter()
+            .find(|event| event.kind == "watchfaces")
+            .unwrap()
+            .data["faces"],
+        json!([])
+    );
+    let identifiers: Vec<String> = (0..129).map(|id| id.to_string()).collect();
+    let faces: Vec<(&str, &str, bool, bool)> = identifiers
+        .iter()
+        .map(|id| (id.as_str(), "", false, false))
+        .collect();
+    session.request(SessionRequest::Watchfaces, 8);
+    let bounded = session.receive(&peer(&watchface_list(&faces), 55, true), 9);
+    assert!(bounded
+        .events
+        .iter()
+        .any(|event| event.kind == "watchface_failed"));
+    assert!(!bounded
+        .events
+        .iter()
+        .any(|event| event.kind == "watchfaces"));
+}
+
+#[test]
+fn watchface_timeout_is_bounded_and_does_not_block_following_health_sync() {
+    let mut session = ready();
+    session.request(SessionRequest::Watchfaces, 6);
+    session.request(SessionRequest::SyncHealth, 7);
+    session.tick(10_006);
+    session.tick(20_006);
+    let expired = session.tick(30_006);
+    assert_eq!(expired.state, "ready");
+    assert!(expired
+        .events
+        .iter()
+        .any(|event| event.kind == "watchface_failed" && event.data["reason"] == "timeout"));
+    assert_eq!(sent_commands(&expired), vec![proto::today_command()]);
+    session.receive(&peer(&list(1, &[]), 54, true), 30_007);
+    let completed = session.receive(&peer(&list(2, &[]), 55, true), 30_008);
+    assert!(completed
+        .events
+        .iter()
+        .any(|event| event.kind == "sync_complete" && event.data["failures"] == 0));
+}
+
+#[test]
+fn watchface_read_waits_for_current_health_file_without_interrupting_assembly() {
+    let mut session = ready();
+    let raw = unknown_file(1_700_000_000);
+    session.request(
+        SessionRequest::RequestFile {
+            file_id_hex: hex::encode(&raw[..7]),
+        },
+        6,
+    );
+    let queued = session.request(SessionRequest::Watchfaces, 7);
+    assert!(queued.outbound.is_empty());
+    let complete = session.receive(&activity(&raw, 54), 8);
+    assert!(complete
+        .events
+        .iter()
+        .any(|event| event.kind == "health_file"));
+    assert_eq!(sent_commands(&complete), vec![vec![8, 4, 16, 0]]);
+    let faces = session.receive(
+        &peer(&watchface_list(&[("001", "", true, false)]), 55, true),
+        9,
+    );
+    assert!(faces.events.iter().any(|event| event.kind == "watchfaces"));
+}
+
+#[test]
+fn watchface_command_status_failure_is_reported_before_payload_parsing() {
+    for subtype in [0, 1] {
+        let mut session = ready_with_faces();
+        if subtype == 0 {
+            session.request(SessionRequest::Watchfaces, 8);
+        } else {
+            session.request(
+                SessionRequest::SetWatchface {
+                    face_id: "002".into(),
+                },
+                8,
+            );
+        }
+        let mut refused = proto::command(4, subtype, None);
+        proto::uint(&mut refused, 100, 9);
+        let update = session.receive(&peer(&refused, 55, true), 9);
+        assert_eq!(update.state, "ready");
+        assert!(update.error.is_none());
+        assert!(update
+            .events
+            .iter()
+            .any(|event| event.kind == "watchface_failed" && event.data["reason"] == "rejected"));
+        assert!(!update
+            .events
+            .iter()
+            .any(|event| event.kind == "watchfaces" || event.kind == "watchface_changed"));
+        assert!(!session
+            .request(SessionRequest::Battery, 10)
+            .outbound
+            .is_empty());
+    }
+}

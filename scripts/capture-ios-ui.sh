@@ -85,9 +85,59 @@ case "$SIMULATOR_ARCH" in
 esac
 
 cd "$PROJECT_ROOT"
-run_bounded rustup target add --toolchain "$RUST_TOOLCHAIN" "$RUST_TARGET"
 SIMULATOR_SDK="$(xcrun --sdk iphonesimulator --show-sdk-path)"
 SIMULATOR_SDK_VERSION="$(xcrun --sdk iphonesimulator --show-sdk-version)"
+# Record installed runtimes and the project's destinations before compiling.
+# SDK availability alone does not prove that a bootable Simulator is installed.
+# Never download runtimes here: a missing compatible runtime must fail clearly.
+run_bounded xcodebuild -version
+run_bounded xcrun simctl list runtimes --json > "$LOG_DIR/simulator-runtimes.json"
+run_bounded xcrun simctl list devices available --json > "$LOG_DIR/available-simulators.json"
+run_bounded xcodebuild \
+  -project "$PROJECT_PATH" \
+  -scheme Band9Diagnostics \
+  -configuration Release \
+  -sdk iphonesimulator \
+  SUPPORTED_PLATFORMS=iphonesimulator \
+  SDKROOT=iphonesimulator \
+  ARCHS="$SIMULATOR_ARCH" \
+  -showdestinations | tee "$LOG_DIR/xcodebuild-showdestinations.txt"
+SIMULATOR_SELECTION="$(run_bounded python3 - "$LOG_DIR/available-simulators.json" "$SIMULATOR_SDK_VERSION" "$LOG_DIR/xcodebuild-showdestinations.txt" <<'PY'
+import json
+import re
+import sys
+with open(sys.argv[1], encoding="utf-8") as file:
+    devices = json.load(file)["devices"]
+with open(sys.argv[3], encoding="utf-8") as file:
+    destinations = file.read().split("Ineligible destinations", 1)[0]
+candidates = []
+sdk_version = tuple(map(int, sys.argv[2].split(".")))
+available_phones = 0
+for runtime, entries in devices.items():
+    if ".iOS-" not in runtime:
+        continue
+    runtime_version = tuple(map(int, runtime.rsplit(".iOS-", 1)[1].split("-")))
+    if not 17 <= runtime_version[0] <= sdk_version[0]:
+        continue
+    for device in entries:
+        if device.get("isAvailable") and device["name"].startswith("iPhone"):
+            available_phones += 1
+            if not re.search(r"platform:iOS Simulator[^\n]*\bid:\s*" + re.escape(device["udid"]) + r"\s*[,}]", destinations):
+                continue
+            candidates.append((runtime_version != sdk_version, device["name"] != "iPhone 16 Pro",
+                               device["name"], device["udid"], device["state"]))
+if not candidates:
+    if available_phones:
+        raise SystemExit("Installed iPhone Simulators are not valid project destinations; inspect xcodebuild-showdestinations.txt")
+    raise SystemExit("No installed compatible iPhone Simulator; inspect simulator-runtimes.json. No runtime was downloaded.")
+_, _, name, udid, state = sorted(candidates)[0]
+print(f"{udid}|{state}|{name}")
+PY
+)"
+IFS='|' read -r SIMULATOR_ID SIMULATOR_STATE SIMULATOR_NAME <<< "$SIMULATOR_SELECTION"
+printf 'Capturing %s on %s (%s)\n' "$BUNDLE_ID" "$SIMULATOR_NAME" "$SIMULATOR_ARCH"
+
+run_bounded rustup target add --toolchain "$RUST_TOOLCHAIN" "$RUST_TARGET"
 run_bounded env SDKROOT="$SIMULATOR_SDK" \
   cargo +"$RUST_TOOLCHAIN" build --package band9-ffi --release --target "$RUST_TARGET" --locked
 SIMULATOR_LIBRARY_DIR="$CARGO_TARGET_DIR/$RUST_TARGET/release"
@@ -100,7 +150,8 @@ run_bounded xcodebuild \
   -scheme Band9Diagnostics \
   -configuration Release \
   -sdk iphonesimulator \
-  -destination 'generic/platform=iOS Simulator' \
+  -destination "platform=iOS Simulator,id=$SIMULATOR_ID" \
+  -destination-timeout 15 \
   -derivedDataPath "$SIMULATOR_BUILD_DIR" \
   SUPPORTED_PLATFORMS=iphonesimulator \
   SDKROOT=iphonesimulator \
@@ -125,32 +176,6 @@ if info.get("CFBundleIdentifier") != "org.band9lab.diagnostics":
     raise SystemExit("Unexpected Simulator application identifier")
 PY
 
-run_bounded xcrun simctl list devices available --json > "$LOG_DIR/available-simulators.json"
-SIMULATOR_SELECTION="$(python3 - "$LOG_DIR/available-simulators.json" "$SIMULATOR_SDK_VERSION" <<'PY'
-import json
-import sys
-with open(sys.argv[1], encoding="utf-8") as file:
-    devices = json.load(file)["devices"]
-candidates = []
-sdk_version = tuple(map(int, sys.argv[2].split(".")))
-for runtime, entries in devices.items():
-    if ".iOS-" not in runtime:
-        continue
-    runtime_version = tuple(map(int, runtime.rsplit(".iOS-", 1)[1].split("-")))
-    if not 17 <= runtime_version[0] <= sdk_version[0]:
-        continue
-    for device in entries:
-        if device.get("isAvailable") and device["name"].startswith("iPhone"):
-            candidates.append((runtime_version != sdk_version, device["name"] != "iPhone 16 Pro",
-                               device["name"], device["udid"], device["state"]))
-if not candidates:
-    raise SystemExit("No available iPhone Simulator; UI capture cannot be verified")
-_, _, name, udid, state = sorted(candidates)[0]
-print(f"{udid}|{state}|{name}")
-PY
-)"
-IFS='|' read -r SIMULATOR_ID SIMULATOR_STATE SIMULATOR_NAME <<< "$SIMULATOR_SELECTION"
-printf 'Capturing %s on %s (%s)\n' "$BUNDLE_ID" "$SIMULATOR_NAME" "$SIMULATOR_ARCH"
 if [[ "$SIMULATOR_STATE" != Booted ]]; then
   run_bounded xcrun simctl boot "$SIMULATOR_ID"
 fi

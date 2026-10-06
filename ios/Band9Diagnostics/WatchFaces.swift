@@ -274,12 +274,10 @@ struct FaceGalleryView: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 30) {
-                    intro
-                    gallerySection("色彩与数字", subtitle: "用鲜明的色彩，换一种看时间的方式。", kinds: [.digital, .split])
-                    gallerySection("从容时刻", subtitle: "指针与光影之间，找到自己的节奏。", kinds: [.analog, .solar])
-                    gallerySection("让信息一目了然", subtitle: "把同步的真实数据放到眼前。", kinds: [.modular, .activity])
+                    DeviceWatchFacesSummary(model: model)
+                    localDesignsEntry
                 }
-                .padding(.vertical, 16)
+                .padding(20)
             }
             .background(.black)
             .navigationTitle("表盘图库")
@@ -289,17 +287,55 @@ struct FaceGalleryView: View {
         .preferredColorScheme(.dark)
     }
 
-    private var intro: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("一眼，就是你的风格。")
-                .font(.system(size: 28, weight: .bold, design: .rounded))
-            Text("六款原创设计，自由搭配颜色和信息。")
-                .font(.subheadline).foregroundStyle(.secondary)
-            Label("本机预览 · 尚不支持发送到手环", systemImage: "iphone")
-                .font(.caption).foregroundStyle(.orange)
-                .padding(.top, 2)
+    private var localDesignsEntry: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("本机设计预览").font(.title2.bold())
+            NavigationLink {
+                LocalFaceDesignsView(library: library, model: model)
+            } label: {
+                HStack(spacing: 14) {
+                    Image(systemName: "paintpalette").font(.title2).foregroundStyle(.orange)
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text("探索原创设计").font(.headline).foregroundStyle(.white)
+                        Text("6 款设计 · 在 iPhone 上搭配和收藏")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer(minLength: 4)
+                    Image(systemName: "chevron.right").font(.caption).foregroundStyle(.secondary)
+                }
+                .padding(18)
+                .background(faceCardColor, in: RoundedRectangle(cornerRadius: 18))
+            }.buttonStyle(.plain)
+            Text("这些是 App 内的原创预览，不是手环当前的表盘，暂不能安装到手环。")
+                .font(.footnote).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
-        .padding(.horizontal, 20)
+    }
+}
+
+private struct LocalFaceDesignsView: View {
+    @ObservedObject var library: FaceLibrary
+    @ObservedObject var model: BluetoothModel
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 30) {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("一眼，就是你的风格。")
+                        .font(.system(size: 28, weight: .bold, design: .rounded))
+                    Text("六款原创设计，自由搭配颜色和信息。")
+                        .font(.subheadline).foregroundStyle(.secondary)
+                    Label("本机预览 · 尚不支持发送到手环", systemImage: "iphone")
+                        .font(.caption).foregroundStyle(.orange)
+                }.padding(.horizontal, 20)
+                gallerySection("色彩与数字", subtitle: "用鲜明的色彩，换一种看时间的方式。", kinds: [.digital, .split])
+                gallerySection("从容时刻", subtitle: "指针与光影之间，找到自己的节奏。", kinds: [.analog, .solar])
+                gallerySection("让信息一目了然", subtitle: "把同步的真实数据放到眼前。", kinds: [.modular, .activity])
+            }.padding(.vertical, 16)
+        }
+        .background(.black)
+        .navigationTitle("本机设计预览")
+        .navigationBarTitleDisplayMode(.inline)
     }
 
     private func gallerySection(_ title: String, subtitle: String, kinds: [WatchFaceKind]) -> some View {
@@ -357,7 +393,7 @@ struct SavedFacesRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(alignment: .firstTextBaseline) {
-                Text("我的表盘").font(.title2.bold())
+                Text("收藏的设计").font(.title2.bold())
                 Spacer()
                 Text("本机预览").font(.caption).foregroundStyle(.secondary)
             }
@@ -365,7 +401,7 @@ struct SavedFacesRow: View {
                 VStack(alignment: .leading, spacing: 8) {
                     Label("收藏你喜欢的设计", systemImage: "rectangle.stack")
                         .font(.headline)
-                    Text("前往“表盘图库”搭配颜色，收藏后会显示在这里。预览暂不能发送到手环。")
+                    Text("前往“表盘图库”的“本机设计预览”搭配颜色，收藏后会显示在这里。预览暂不能发送到手环。")
                         .font(.subheadline).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }
                 .padding(18).frame(maxWidth: .infinity, alignment: .leading)

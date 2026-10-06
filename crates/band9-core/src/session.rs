@@ -17,6 +17,7 @@ use zeroize::{Zeroize, Zeroizing};
 const RESPONSE_TIMEOUT: u64 = 30_000;
 const MAX_RETRIES: u8 = 2;
 const MAX_FILES: usize = 512;
+const MAX_WATCHFACES: usize = 128;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -85,6 +86,8 @@ impl Drop for SessionOptions {
 pub enum SessionRequest {
     Battery,
     DeviceInfo,
+    Watchfaces,
+    SetWatchface { face_id: String },
     SyncHealth,
     RequestFile { file_id_hex: String },
     FileReceived { file_id_hex: String },
@@ -125,6 +128,33 @@ impl SessionUpdate {
         self.error = Some(message.clone());
         self.event("protocol_error", message, json!({}));
     }
+
+    fn watchface_failure(
+        &mut self,
+        operation: &str,
+        face_id: Option<&str>,
+        reason: &str,
+        message: &str,
+    ) {
+        self.event(
+            "watchface_failed",
+            message,
+            json!({"operation":operation,"face_id":face_id,"reason":reason}),
+        );
+    }
+}
+
+#[derive(Serialize)]
+struct Watchface {
+    id: String,
+    name: String,
+    active: bool,
+    can_delete: bool,
+}
+
+enum WatchfaceReply {
+    List(Vec<Watchface>),
+    SetAck(u32),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -134,6 +164,9 @@ enum Task {
     Auth,
     Battery,
     DeviceInfo,
+    Watchfaces,
+    SetWatchface(String),
+    VerifyWatchface(String),
     Today,
     Past,
     File(String),
@@ -169,6 +202,7 @@ pub struct Session {
     sync_failures: usize,
     last_now: u64,
     pairing_until: Option<u64>,
+    watchface_ids: HashSet<String>,
 }
 
 impl Session {
@@ -217,6 +251,7 @@ impl Session {
             sync_failures: 0,
             last_now: 0,
             pairing_until: None,
+            watchface_ids: HashSet::new(),
         })
     }
 
@@ -330,6 +365,18 @@ impl Session {
                     Task::Today | Task::Past | Task::File(_)
                 ));
                 self.assembler.reset();
+                match &pending.task {
+                    Task::Watchfaces => {
+                        out.watchface_failure("list", None, "timeout", "读取手环表盘超时，请重试。")
+                    }
+                    Task::SetWatchface(id) | Task::VerifyWatchface(id) => out.watchface_failure(
+                        "set",
+                        Some(id),
+                        "timeout",
+                        "未能确认手环表盘是否已切换，请刷新列表查看。",
+                    ),
+                    _ => {}
+                }
                 out.event(
                     "request_failed",
                     "手环未完成本次请求",
@@ -352,16 +399,80 @@ impl Session {
             return self.finish(out);
         }
         if self.state != "ready" {
+            match &request {
+                SessionRequest::Watchfaces => out.watchface_failure(
+                    "list",
+                    None,
+                    "not_authenticated",
+                    "请先连接并认证手环，再读取表盘。",
+                ),
+                SessionRequest::SetWatchface { face_id } => out.watchface_failure(
+                    "set",
+                    Some(face_id),
+                    "not_authenticated",
+                    "请先连接并认证手环，再切换表盘。",
+                ),
+                _ => {}
+            }
             out.problem("手环尚未完成认证");
             return out;
         }
         if self.queue.len() >= MAX_FILES + 8 {
+            match &request {
+                SessionRequest::Watchfaces => out.watchface_failure(
+                    "list",
+                    None,
+                    "busy",
+                    "手环正在处理其他请求，请稍后读取表盘。",
+                ),
+                SessionRequest::SetWatchface { face_id } => out.watchface_failure(
+                    "set",
+                    Some(face_id),
+                    "busy",
+                    "手环正在处理其他请求，请稍后切换表盘。",
+                ),
+                _ => {}
+            }
             out.problem("request queue is full");
             return out;
         }
         match request {
             SessionRequest::Battery => self.enqueue_unique(Task::Battery),
             SessionRequest::DeviceInfo => self.enqueue_unique(Task::DeviceInfo),
+            SessionRequest::Watchfaces => {
+                self.enqueue_unique(Task::Watchfaces);
+                out.event("watchfaces_loading", "正在读取手环已有表盘", json!({}));
+            }
+            SessionRequest::SetWatchface { face_id } => {
+                let changing = self.pending.as_ref().is_some_and(|p| {
+                    matches!(p.task, Task::SetWatchface(_) | Task::VerifyWatchface(_))
+                }) || self
+                    .queue
+                    .iter()
+                    .any(|t| matches!(t, Task::SetWatchface(_) | Task::VerifyWatchface(_)));
+                if changing {
+                    out.watchface_failure(
+                        "set",
+                        Some(&face_id),
+                        "busy",
+                        "正在确认上一次表盘切换，请稍候。",
+                    );
+                } else if !valid_watchface_id(&face_id) || !self.watchface_ids.contains(&face_id) {
+                    out.watchface_failure(
+                        "set",
+                        Some(&face_id),
+                        "not_found",
+                        "请先刷新手环表盘，并从已读取的列表中选择。",
+                    );
+                } else {
+                    self.enqueue_unique(Task::SetWatchface(face_id.clone()));
+                    out.event(
+                        "watchface_changing",
+                        "正在切换手环表盘",
+                        json!({"face_id":face_id}),
+                    );
+                }
+            }
             SessionRequest::SyncHealth => {
                 if self.sync_active {
                     out.event("sync_in_progress", "健康数据正在同步", json!({}));
@@ -638,6 +749,9 @@ impl Session {
         if self.state != "ready" {
             return Err("application command arrived before authentication completed".into());
         }
+        if kind == 4 && matches!(subtype, 0 | 1) {
+            return self.watchface_command(&cmd, subtype, status, out);
+        }
         let expected = match (kind, subtype) {
             (2, 1) => Some(Task::Battery),
             (2, 2) => Some(Task::DeviceInfo),
@@ -738,6 +852,115 @@ impl Session {
         Ok(())
     }
 
+    fn watchface_command(
+        &mut self,
+        cmd: &Message<'_>,
+        subtype: u32,
+        status: Option<u32>,
+        out: &mut SessionUpdate,
+    ) -> Result<(), String> {
+        let task = self
+            .pending
+            .as_ref()
+            .filter(|p| match subtype {
+                0 => matches!(p.task, Task::Watchfaces | Task::VerifyWatchface(_)),
+                1 => matches!(p.task, Task::SetWatchface(_)),
+                _ => false,
+            })
+            .map(|p| p.task.clone());
+        let Some(task) = task else {
+            // A list received before the readback request is sent must not
+            // complete a switch, including one batched with the set response.
+            out.event(
+                "unexpected_watchface",
+                "收到非当前请求的表盘响应",
+                json!({"subtype":subtype}),
+            );
+            return Ok(());
+        };
+        let (operation, face_id) = match &task {
+            Task::Watchfaces => ("list", None),
+            Task::SetWatchface(id) | Task::VerifyWatchface(id) => ("set", Some(id.as_str())),
+            _ => unreachable!(),
+        };
+        if status.is_some_and(|value| value != 0) {
+            self.pending = None;
+            out.watchface_failure(
+                operation,
+                face_id,
+                "rejected",
+                "手环拒绝了本次表盘请求，请刷新后重试。",
+            );
+            return Ok(());
+        }
+        let parsed = (|| -> Result<WatchfaceReply, String> {
+            let watchface = cmd.nested(6)?.ok_or("watchface response is absent")?;
+            if subtype == 0 {
+                let list = watchface.nested(1)?.ok_or("watchface list is absent")?;
+                Ok(WatchfaceReply::List(parse_watchfaces(&list)?))
+            } else {
+                Ok(WatchfaceReply::SetAck(watchface.uint(4)?.ok_or(
+                    "watchface application acknowledgement is absent",
+                )?))
+            }
+        })();
+        let reply = match parsed {
+            Ok(reply) => reply,
+            Err(error) => {
+                self.pending = None;
+                out.watchface_failure(
+                    operation,
+                    face_id,
+                    "invalid_response",
+                    "手环返回的表盘数据不完整，请刷新后重试。",
+                );
+                return Err(error);
+            }
+        };
+        self.pending = None;
+        match reply {
+            WatchfaceReply::List(faces) => {
+                self.watchface_ids = faces.iter().map(|face| face.id.clone()).collect();
+                out.event("watchfaces", "已读取手环已有表盘", json!({"faces":faces}));
+                if let Task::VerifyWatchface(id) = task {
+                    if faces.iter().any(|face| face.id == id && face.active) {
+                        out.event(
+                            "watchface_changed",
+                            "已确认手环使用所选表盘",
+                            json!({"face_id":id}),
+                        );
+                    } else {
+                        out.watchface_failure(
+                            "set",
+                            Some(&id),
+                            "not_active",
+                            "手环尚未显示所选表盘，请刷新列表查看当前状态。",
+                        );
+                    }
+                }
+            }
+            WatchfaceReply::SetAck(1) => {
+                if let Task::SetWatchface(id) = task {
+                    out.event(
+                        "watchface_verifying",
+                        "正在读取手环确认当前表盘",
+                        json!({"face_id":id}),
+                    );
+                    self.queue.push_front(Task::VerifyWatchface(id));
+                }
+            }
+            WatchfaceReply::SetAck(_) => {
+                out.watchface_failure(
+                    operation,
+                    face_id,
+                    "rejected",
+                    "手环未接受表盘切换，请刷新列表后重试。",
+                );
+            }
+        }
+        Ok(())
+    }
+
     fn activity(&mut self, input: &[u8], now: u64, out: &mut SessionUpdate) -> Result<(), String> {
         let expected = match self.pending.as_ref().map(|p| &p.task) {
             Some(Task::File(id)) => id.clone(),
@@ -781,6 +1004,8 @@ impl Session {
             }
             Task::Battery => proto::command(2, 1, None),
             Task::DeviceInfo => proto::command(2, 2, None),
+            Task::Watchfaces | Task::VerifyWatchface(_) => proto::command(4, 0, None),
+            Task::SetWatchface(id) => proto::set_watchface_command(id),
             Task::Today => proto::today_command(),
             Task::Past => proto::command(8, 2, None),
             Task::File(id) => {
@@ -839,7 +1064,22 @@ impl Session {
             return;
         }
         if let Some(task) = self.queue.pop_front() {
-            if let Err(error) = self.send_task(task, now, out) {
+            if let Err(error) = self.send_task(task.clone(), now, out) {
+                match &task {
+                    Task::Watchfaces => out.watchface_failure(
+                        "list",
+                        None,
+                        "send_failed",
+                        "表盘读取请求未能发出，请重新连接后重试。",
+                    ),
+                    Task::SetWatchface(id) | Task::VerifyWatchface(id) => out.watchface_failure(
+                        "set",
+                        Some(id),
+                        "send_failed",
+                        "表盘切换请求未能完成，请重新连接后刷新列表。",
+                    ),
+                    _ => {}
+                }
                 out.problem(error);
             }
         } else if self.sync_active {
@@ -907,7 +1147,45 @@ impl Session {
         self.received.clear();
         self.sync_active = false;
         self.pairing_until = None;
+        self.watchface_ids.clear();
     }
+}
+
+fn valid_watchface_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 128 && !id.chars().any(char::is_control) && !id.trim().is_empty()
+}
+
+fn parse_watchfaces(list: &Message<'_>) -> Result<Vec<Watchface>, String> {
+    let mut faces = Vec::new();
+    let mut seen = HashSet::new();
+    let mut active_count = 0;
+    for bytes in list.repeated_bytes(1, MAX_WATCHFACES)? {
+        let face = Message::parse(bytes)?;
+        let id = face.text(1)?.ok_or("watchface identifier is absent")?;
+        if !valid_watchface_id(&id) || !seen.insert(id.clone()) {
+            return Err("watchface identifier is invalid or duplicated".into());
+        }
+        let name = face.text(2)?.unwrap_or_default();
+        if name.len() > 256 || name.chars().any(char::is_control) {
+            return Err("watchface name is invalid or exceeds 256 bytes".into());
+        }
+        let active = face.uint(3)?.unwrap_or(0);
+        let can_delete = face.uint(4)?.unwrap_or(0);
+        if active > 1 || can_delete > 1 {
+            return Err("watchface boolean exceeds one".into());
+        }
+        active_count += active;
+        if active_count > 1 {
+            return Err("watchface list reports more than one active face".into());
+        }
+        faces.push(Watchface {
+            id,
+            name,
+            active: active == 1,
+            can_delete: can_delete == 1,
+        });
+    }
+    Ok(faces)
 }
 
 fn decode_array<const N: usize>(input: &str, name: &str) -> Result<[u8; N], String> {

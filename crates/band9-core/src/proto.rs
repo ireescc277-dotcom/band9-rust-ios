@@ -84,6 +84,20 @@ impl<'a> Message<'a> {
         self.bytes(number)?.map(Self::parse).transpose()
     }
 
+    pub fn repeated_bytes(&self, number: u32, limit: usize) -> Result<Vec<&'a [u8]>, String> {
+        let mut values = Vec::new();
+        for (_, value) in self.fields.iter().filter(|(n, _)| *n == number) {
+            if values.len() >= limit {
+                return Err(format!("protobuf repeated field {number} exceeds limit"));
+            }
+            match value {
+                Value::Bytes(bytes) => values.push(*bytes),
+                _ => return Err(format!("protobuf field {number} has wrong wire type")),
+            }
+        }
+        Ok(values)
+    }
+
     pub fn text(&self, number: u32) -> Result<Option<String>, String> {
         self.bytes(number)?
             .map(|s| {
@@ -194,6 +208,12 @@ pub fn file_command(file_id: &[u8; 7]) -> Vec<u8> {
     let mut health = Vec::new();
     bytes(&mut health, 2, file_id);
     command(8, 3, Some((10, &health)))
+}
+
+pub fn set_watchface_command(face_id: &str) -> Vec<u8> {
+    let mut watchface = Vec::new();
+    bytes(&mut watchface, 2, face_id.as_bytes());
+    command(4, 1, Some((6, &watchface)))
 }
 
 #[cfg(test)]

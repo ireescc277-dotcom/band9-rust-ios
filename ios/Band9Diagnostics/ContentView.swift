@@ -181,7 +181,8 @@ private struct MyWatchView: View {
                             Image(systemName: "chevron.right").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
                         }.padding(18).background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 18))
                     }.buttonStyle(.plain)
-                    SavedFacesRow(library: library, model: model)
+                    DeviceWatchFacesSummary(model: model)
+                    if !library.faces.isEmpty { SavedFacesRow(library: library, model: model) }
                 }
                 VStack(spacing: 0) {
                     ForEach(routes) { route in
@@ -393,6 +394,10 @@ private struct PrivacyView: View {
                 Text("只有使用“数据与导出”中的分享按钮时，你选择的接收方才会收到导出文件。")
                 Text("当前没有写入 Apple 健康。删除 App 可能同时删除本机健康档案，重要记录请先导出。")
             }.font(.subheadline)
+            Section("表盘预览图") {
+                Text("预览图按手环型号和已安装表盘编号从小米官方目录加载。这些请求不包含配对密钥、设备标识或健康记录；预览图不是手环的实时屏幕截图。")
+                    .font(.subheadline)
+            }
         }.navigationTitle("隐私").navigationBarTitleDisplayMode(.inline)
     }
 }
@@ -403,6 +408,7 @@ struct CapabilitiesView: View {
             Section("当前已接入") {
                 capability("活动记录", "步数、距离、活动能量；每日和历史统计。", "figure.walk", .green)
                 capability("连接与电量", "连接、认证、同步、电量读取。", "applewatch", .orange)
+                capability("手环表盘", "读取已安装列表和当前状态；切换后重新读取确认。匹配的预览图来自小米官方目录。", "square.stack", .orange)
                 capability("本机档案", "原始文件、去重记录和主动导出。", "externaldrive", .blue)
             }
             Section("收到对应记录后可展示") {
@@ -410,7 +416,7 @@ struct CapabilitiesView: View {
                 capability("睡眠", "展示手环明确记录的睡眠阶段和时长。", "moon.fill", .indigo)
             }
             Section("待接入") {
-                Text("压力、运动详情、通知与闹钟、天气、手环表盘管理、Apple 健康同步。")
+                Text("压力、运动详情、通知与闹钟、天气、表盘资源上传、Apple 健康同步。")
                 Text("图库里的设计目前是本机预览，尚不能安装到手环。")
             }.font(.subheadline).foregroundStyle(.secondary)
             Section { Text("本 App 不会用缺失的数据生成恢复评分、身体电量或健康诊断。")

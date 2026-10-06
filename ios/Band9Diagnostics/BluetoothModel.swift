@@ -35,6 +35,18 @@ struct DiagnosticLog: Identifiable, Codable {
     enum CodingKeys: String, CodingKey { case time, message }
 }
 
+struct DeviceWatchFace: Identifiable, Codable {
+    let id: String
+    let name: String
+    let isActive: Bool
+    let canDelete: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case id, name
+        case isActive = "active", canDelete = "can_delete"
+    }
+}
+
 // CBCentralManager, Rust sessions and write queues are confined to the main
 // queue. Keys stay in Keychain and are excluded from logs and exports.
 final class BluetoothModel: NSObject, ObservableObject {
@@ -68,7 +80,12 @@ final class BluetoothModel: NSObject, ObservableObject {
     @Published private(set) var healthExportURL: URL?
     @Published private(set) var retrievedConnectedCount = 0
     @Published private(set) var scanResultCount = 0
+    @Published private(set) var watchfaces: [DeviceWatchFace] = []
+    @Published private(set) var watchfacesState = "连接手环后读取已安装的表盘"
+    @Published private(set) var isLoadingWatchfaces = false
+    @Published private(set) var isChangingWatchface = false
     let archive = HealthArchive()
+    let watchfacePreviews = WatchfacePreviewStore()
 
     private enum Phase: String {
         case idle, connecting, discovering, ready, failed, cancelling
@@ -108,6 +125,7 @@ final class BluetoothModel: NSObject, ObservableObject {
 
     override init() {
         super.init()
+        watchfacePreviews.didUpdate = { [weak self] in self?.prepareExport() }
         if let data = UserDefaults.standard.data(forKey: "band9.last-device") {
             lastDevice = try? JSONDecoder().decode(ScanDevice.self, from: data)
         }
@@ -124,7 +142,7 @@ final class BluetoothModel: NSObject, ObservableObject {
     var coreVersion: String { RustBridge.version }
 
     var appVersion: String {
-        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.2.0"
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.3.0"
         let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "1"
         return "\(version) (\(build))"
     }
@@ -327,6 +345,9 @@ final class BluetoothModel: NSObject, ObservableObject {
         batteryLevel = nil
         firmware = nil
         modelName = nil
+        watchfaces = []
+        watchfacePreviews.reset()
+        watchfacesState = "连接手环后读取已安装的表盘"
         notificationCount = 0
         isSubscribed = false
         pendingServices.removeAll()
@@ -514,6 +535,12 @@ final class BluetoothModel: NSObject, ObservableObject {
             let scanResults: [ScanDevice]
             let retrieveConnectedCount: Int
             let scanCount: Int
+            let watchfaces: [DeviceWatchFace]
+            let watchfacesState: String
+            let isLoadingWatchfaces: Bool
+            let isChangingWatchface: Bool
+            let watchfacePreviewCount: Int
+            let watchfacePreviewUnavailable: Int
         }
         let report = Report(schemaVersion: 1, exportedAt: Date(), appVersion: appVersion,
                             coreVersion: coreVersion, systemVersion: UIDevice.current.systemVersion,
@@ -523,7 +550,11 @@ final class BluetoothModel: NSObject, ObservableObject {
                             device: selectedDevice, services: services, diagnosis: diagnosis,
                             batteryPercent: batteryLevel, notificationCount: notificationCount, logs: logs,
                             limitations: ["服务匹配本身不能证明设备型号或认证成功。", "健康记录保存在本机；当前未写入 HealthKit。", "不包含密钥、会话随机数或通知原始内容；包含设备名称和本机蓝牙设备标识。"],
-                            scanResults: devices, retrieveConnectedCount: retrievedConnectedCount, scanCount: scanResultCount)
+                            scanResults: devices, retrieveConnectedCount: retrievedConnectedCount, scanCount: scanResultCount,
+                            watchfaces: watchfaces, watchfacesState: watchfacesState,
+                            isLoadingWatchfaces: isLoadingWatchfaces, isChangingWatchface: isChangingWatchface,
+                            watchfacePreviewCount: watchfacePreviews.images.count,
+                            watchfacePreviewUnavailable: watchfacePreviews.unavailable.count)
         do {
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -872,6 +903,13 @@ extension BluetoothModel {
         writeQueue.removeAll()
         awaitingWriteResponse = false
         isAuthenticated = false
+        if isLoadingWatchfaces || isChangingWatchface {
+            watchfacesState = "连接已中断，重新连接后刷新表盘状态。"
+        } else if !watchfaces.isEmpty {
+            watchfacesState = "已断开，显示上次读取的表盘状态。"
+        }
+        isLoadingWatchfaces = false
+        isChangingWatchface = false
         if isSyncing { syncMessage = "同步已中断，已收到的数据保留在本机。" }
         isSyncing = false
         authState = "尚未认证"
@@ -926,10 +964,10 @@ extension BluetoothModel {
         prepareExport()
     }
 
-    private func runSessionCommand(_ operation: String, hex: String? = nil) {
+    private func runSessionCommand(_ operation: String, hex: String? = nil, faceID: String? = nil) {
         guard let session = session else { return }
         do {
-            let response = try session.command(operation, hex: hex)
+            let response = try session.command(operation, hex: hex, faceID: faceID)
             if let reconnect = response.events.first(where: { $0.kind == "reconnect_required" }) {
                 handleSessionEvent(reconnect)
                 return
@@ -940,6 +978,11 @@ extension BluetoothModel {
             }
             if let error = response.error {
                 log("协议提示，继续处理本次响应：\(error)")
+                if operation == "watchfaces" || operation == "set_watchface" {
+                    isLoadingWatchfaces = false
+                    isChangingWatchface = false
+                    watchfacesState = error
+                }
             }
             // Preserve Rust's order, including all fragments of a frame.
             for item in response.outbound {
@@ -1007,6 +1050,7 @@ extension BluetoothModel {
             log("手环协议认证成功。")
             runSessionCommand("battery")
             runSessionCommand("device_info")
+            refreshWatchfaces()
             prepareExport()
         case "battery":
             if let percent = event.data["percent"]?.number, percent >= 0, percent <= 100 {
@@ -1017,6 +1061,42 @@ extension BluetoothModel {
         case "device_info":
             firmware = event.data["firmware"]?.string
             modelName = event.data["model"]?.string
+            watchfacePreviews.load(model: modelName, faces: watchfaces)
+            prepareExport()
+        case "watchfaces_loading":
+            isLoadingWatchfaces = true
+            watchfacesState = event.message
+        case "watchface_changing", "watchface_verifying":
+            isChangingWatchface = true
+            watchfacesState = event.message
+        case "watchfaces":
+            struct ListResponse: Decodable { let faces: [DeviceWatchFace] }
+            do {
+                let result = try JSONDecoder().decode(ListResponse.self, from: JSONEncoder().encode(event.data))
+                watchfaces = result.faces
+                watchfacePreviews.load(model: modelName, faces: result.faces)
+                isLoadingWatchfaces = false
+                watchfacesState = result.faces.isEmpty ? "手环返回的已安装表盘列表为空。" : "已从手环读取 \(result.faces.count) 款表盘。"
+                log(watchfacesState)
+                prepareExport()
+            } catch {
+                isLoadingWatchfaces = false
+                isChangingWatchface = false
+                watchfacesState = "表盘列表格式无法识别，请刷新后重试。"
+                log(watchfacesState)
+                prepareExport()
+            }
+        case "watchface_changed":
+            isChangingWatchface = false
+            isLoadingWatchfaces = false
+            watchfacesState = "手环已确认切换，当前表盘状态已读回。"
+            log(watchfacesState)
+            prepareExport()
+        case "watchface_failed":
+            isLoadingWatchfaces = false
+            isChangingWatchface = false
+            watchfacesState = event.message
+            log("表盘操作未完成：\(event.message)")
             prepareExport()
         case "health_file":
             guard let device = selectedDevice?.id else { return }
@@ -1058,6 +1138,10 @@ extension BluetoothModel {
 
     func syncHealth() {
         guard isAuthenticated, !isSyncing else { return }
+        guard !isLoadingWatchfaces, !isChangingWatchface else {
+            syncMessage = "请等待表盘操作完成后再同步健康记录。"
+            return
+        }
         isSyncing = true
         syncHadFailures = false
         syncMessage = "正在获取手环健康记录…"
@@ -1068,6 +1152,24 @@ extension BluetoothModel {
     func refreshBattery() {
         guard isAuthenticated else { return }
         runSessionCommand("battery")
+    }
+
+    func refreshWatchfaces() {
+        guard isAuthenticated else { watchfacesState = "请先连接并认证手环。"; return }
+        guard !isLoadingWatchfaces, !isChangingWatchface else { return }
+        guard !isSyncing else { watchfacesState = "健康数据正在同步，请完成后再刷新表盘。"; return }
+        isLoadingWatchfaces = true
+        watchfacesState = "正在读取手环上的表盘…"
+        runSessionCommand("watchfaces")
+    }
+
+    func selectWatchface(_ face: DeviceWatchFace) {
+        guard isAuthenticated, !isLoadingWatchfaces, !isChangingWatchface else { return }
+        guard !isSyncing else { watchfacesState = "健康数据正在同步，请完成后再切换表盘。"; return }
+        guard let current = watchfaces.first(where: { $0.id == face.id }), !current.isActive else { return }
+        isChangingWatchface = true
+        watchfacesState = "正在请求手环切换表盘…"
+        runSessionCommand("set_watchface", faceID: face.id)
     }
 
     func exportHealth() {

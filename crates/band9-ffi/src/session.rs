@@ -17,6 +17,8 @@ enum Command {
     Tick { now_ms: u64 },
     Battery { now_ms: u64 },
     DeviceInfo { now_ms: u64 },
+    Watchfaces { now_ms: u64 },
+    SetWatchface { face_id: String, now_ms: u64 },
     Sync { now_ms: u64 },
     Disconnect { now_ms: u64 },
 }
@@ -111,6 +113,10 @@ pub unsafe extern "C" fn band9_session_command(
             Command::Tick { now_ms } => session.tick(now_ms),
             Command::Battery { now_ms } => session.request(SessionRequest::Battery, now_ms),
             Command::DeviceInfo { now_ms } => session.request(SessionRequest::DeviceInfo, now_ms),
+            Command::Watchfaces { now_ms } => session.request(SessionRequest::Watchfaces, now_ms),
+            Command::SetWatchface { face_id, now_ms } => {
+                session.request(SessionRequest::SetWatchface { face_id }, now_ms)
+            }
             Command::Sync { now_ms } => session.request(SessionRequest::SyncHealth, now_ms),
             Command::Disconnect { now_ms } => session.request(SessionRequest::Disconnect, now_ms),
         };
@@ -185,5 +191,36 @@ mod tests {
             assert!(decode_hex(invalid).is_none());
         }
         assert!(decode_hex(&"a".repeat(65538)).is_none());
+    }
+
+    #[test]
+    fn watchface_abi_operations_reach_the_engine_with_the_documented_json_contract() {
+        let options = CString::new(r#"{"key_hex":"a0a1a2a3a4a5a6a7a8a9aaabacadaeaf","phone_nonce_hex":"000102030405060708090a0b0c0d0e0f","mtu":185}"#).unwrap();
+        // SAFETY: this test exclusively owns the handle and each request/result.
+        unsafe {
+            let handle = band9_session_create(options.as_ptr());
+            assert!(!handle.is_null());
+            for (request, operation) in [
+                (r#"{"op":"watchfaces","now_ms":0}"#, "list"),
+                (
+                    r#"{"op":"set_watchface","face_id":"002","now_ms":1}"#,
+                    "set",
+                ),
+            ] {
+                let update = command(handle, request);
+                let failure = update["events"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|event| event["kind"] == "watchface_failed")
+                    .unwrap();
+                assert_eq!(failure["data"]["operation"], operation);
+                assert_eq!(failure["data"]["reason"], "not_authenticated");
+                assert!(update["outbound"].as_array().unwrap().is_empty());
+            }
+            let malformed = command(handle, r#"{"op":"set_watchface","now_ms":2}"#);
+            assert_eq!(malformed["error"], "会话请求格式不正确。");
+            band9_session_free(handle);
+        }
     }
 }

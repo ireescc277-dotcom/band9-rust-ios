@@ -73,11 +73,12 @@ final class RustSession {
         guard handle != nil else { throw Failure.create }
     }
 
-    func command(_ operation: String, hex: String? = nil) throws -> SessionReply {
+    func command(_ operation: String, hex: String? = nil, faceID: String? = nil) throws -> SessionReply {
         guard let handle = handle else { throw Failure.closed }
         let elapsed = (pausedAt ?? ProcessInfo.processInfo.systemUptime) - pausedDuration
         var request: [String: Any] = ["op": operation, "now_ms": UInt64(max(0, elapsed) * 1000)]
         if let hex = hex { request["hex"] = hex }
+        if let faceID = faceID { request["face_id"] = faceID }
         let json = String(decoding: try JSONSerialization.data(withJSONObject: request), as: UTF8.self)
         return try json.withCString { input in
             guard let output = band9_session_command(handle, input) else { throw Failure.response }
