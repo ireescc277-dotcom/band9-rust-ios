@@ -27,8 +27,8 @@ Rust 协议核心 + SwiftUI / CoreBluetooth 客户端，iOS 17+。在 Windows �
 
 1. 在 [Actions](https://github.com/ireescc277-dotcom/band9-rust-ios/actions/workflows/ci.yml) 下载最新成功运行的 `Band9Diagnostics-unsigned-*` 构建产物。
 2. 对其中 IPA 签名安装。它是 iPhone arm64 **未签名包，不能直接安装**；保留 `org.band9lab.diagnostics` Bundle ID 可更新之前的诊断版。
-3. 在“手环”页查找设备。已被系统或 Mi Fitness 连接的设备也会尝试列入候选列表。名称本身不能确认设备型号。
-4. 选择自己的设备，输入或导入对应 auth key。App 在 Keychain 本地保存它，并在已确认的 V2 通道上执行认证。
+3. 若已有导入文件，可在“手环”页点“从设备文件连接”，选择自己的设备记录；记录含有效蓝牙 UUID 时会直接尝试连接。把 `private-band-auth-key.json` 放在 App 的“文件”目录后，首页和“手环”页会出现“导入已准备的手环”入口。
+4. 也可在“手环”页扫描并选择设备，再输入对应 auth key。已被系统或 Mi Fitness 连接的设备会尝试列入候选列表。App 按设备将密钥保存在 Keychain，并在匹配的 V2 通道上执行认证；名称本身不能确认设备型号。
 5. 认证成功后点击同步，在“今天”和“记录”页查看结果。未知格式可导出原始文件用于适配。
 
 ### 获取自己的 auth key
@@ -63,6 +63,6 @@ cargo test --workspace --all-targets --locked
 python -m unittest discover -s scripts -p 'test_*.py'
 ```
 
-工具链固定在 `rust-toolchain.toml`；已有相同版本 stable 时可用 `cargo +stable`。CI 验证 Rust，再在 macOS 编译链接 Swift 和 Rust，校验 IPA 的 ZIP、设备平台、架构和摘要。合成测试不等于真实手环测试。当前用户设备报告仅证实旧诊断版扫描未建立应用连接；没有真实认证或健康样本作为验收证据。
+工具链固定在 `rust-toolchain.toml`；已有相同版本 stable 时可用 `cargo +stable`。CI 验证 Rust，再在 macOS 编译链接 Swift 和 Rust，校验 IPA 的 ZIP、设备平台、架构和摘要。构建 3 已通过 66 项 Rust 测试及 3 项 Python 测试，并在本地签名后通过 USB 覆盖安装到 iPhone；已读回版本 0.2.0 / 构建 3，确认导入文件保留。合成测试和安装成功不等于真实手环测试；认证、电量和健康记录的实机验收仍待完成。签名材料及真实导入文件不在仓库中。
 
 协议来源、密钥限制和验收步骤见 [协议说明](docs/PROTOCOL.md)。新增实现依据公开协议事实独立编写，没有复制 my-band 的 Swift 源码或 Gadgetbridge 的生成 schema。测试使用公开合成密钥；不发送健康文件消费命令 8/5。
