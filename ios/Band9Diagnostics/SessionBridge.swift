@@ -69,7 +69,7 @@ final class RustSession {
         let encoded = try JSONSerialization.data(withJSONObject: config)
         let json = String(decoding: encoded, as: UTF8.self)
         handle = json.withCString { band9_session_create($0) }
-        nonce.withUnsafeMutableBytes { $0.initializeMemory(as: UInt8.self, repeating: 0) }
+        _ = nonce.withUnsafeMutableBytes { $0.initializeMemory(as: UInt8.self, repeating: 0) }
         guard handle != nil else { throw Failure.create }
     }
 

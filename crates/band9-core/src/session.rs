@@ -457,7 +457,15 @@ impl Session {
         now: u64,
         out: &mut SessionUpdate,
     ) -> Result<(), String> {
-        if self.state == "ready" {
+        let reopened_after_pairing = self.pairing_until.is_some()
+            && matches!(self.state, "awaiting_nonce" | "awaiting_auth")
+            && payload.first() == Some(&2);
+        // The watch can reopen its session after the user accepts pairing.
+        // Reusing the old nonce/proof here would strand the new watch session;
+        // ask the platform to create a fresh session with secure randomness.
+        // Ordinary duplicate accepts during an uninterrupted handshake remain
+        // ignored below.
+        if self.state == "ready" || reopened_after_pairing {
             out.event(
                 "reconnect_required",
                 "手环重新开启了通信会话，正在重新连接",

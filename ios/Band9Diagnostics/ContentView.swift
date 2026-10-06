@@ -20,6 +20,7 @@ struct ContentView: View {
 private struct HealthDashboard: View {
     @ObservedObject var model: BluetoothModel
     @ObservedObject var archive: HealthArchive
+    @State private var showingLocalImport = false
     private let columns = [GridItem(.flexible()), GridItem(.flexible())]
     private var records: [HealthRecord] { archive.records(for: model.currentDeviceID) }
     private var heartRecords: [HealthRecord] {
@@ -89,6 +90,9 @@ private struct HealthDashboard: View {
             }
             .background(Color(uiColor: .systemGroupedBackground))
             .navigationTitle("今天")
+            .sheet(isPresented: $showingLocalImport) {
+                DeviceKeyView(model: model, initialImportURL: model.pendingDeviceImportURL)
+            }
         }
     }
 
@@ -107,6 +111,10 @@ private struct HealthDashboard: View {
                 }
             }
             Text(model.syncMessage).font(.caption).foregroundStyle(.secondary)
+            if model.pendingDeviceImportURL != nil {
+                Button("导入已准备的手环") { showingLocalImport = true }
+                    .font(.subheadline.weight(.semibold))
+            }
             Button(action: model.isAuthenticated ? model.syncHealth : model.reconnect) {
                 HStack {
                     if model.isSyncing { ProgressView().tint(.white) }
@@ -189,6 +197,7 @@ private struct DeviceView: View {
     @ObservedObject var archive: HealthArchive
     @State private var showingKey = false
     @State private var showingDiagnostics = false
+    @State private var loadLocalImport = false
     private var deviceFiles: [ArchivedHealthFile] { archive.files.filter { $0.deviceID == model.currentDeviceID } }
 
     var body: some View {
@@ -202,12 +211,16 @@ private struct DeviceView: View {
                     if let battery = model.batteryLevel { LabeledContent("电量", value: "\(battery)%") }
                     if let firmware = model.firmware { LabeledContent("固件", value: firmware) }
                     if model.currentDeviceID != nil {
-                        Button(model.hasStoredKey ? "更新设备密钥" : "添加设备密钥") { showingKey = true }
+                        Button(model.hasStoredKey ? "更新设备密钥" : "添加设备密钥") { loadLocalImport = false; showingKey = true }
                         Button("重新连接", action: model.reconnect)
                     }
                     if model.isConnected || model.isBusy { Button("断开连接", role: .destructive, action: model.disconnect) }
                 }
                 Section {
+                    Button("从设备文件连接") { loadLocalImport = false; showingKey = true }
+                    if model.pendingDeviceImportURL != nil {
+                        Button("导入已准备的手环") { loadLocalImport = true; showingKey = true }
+                    }
                     Button(action: model.scan) { Label(model.isScanning ? "重新查找手环" : "查找附近手环", systemImage: "magnifyingglass") }
                     if model.isScanning {
                         HStack { ProgressView(); Text("正在扫描，最多 15 秒…").font(.caption) }
@@ -262,7 +275,9 @@ private struct DeviceView: View {
                 }
             }
             .navigationTitle("我的手环")
-            .sheet(isPresented: $showingKey) { DeviceKeyView(model: model) }
+            .sheet(isPresented: $showingKey) {
+                DeviceKeyView(model: model, initialImportURL: loadLocalImport ? model.pendingDeviceImportURL : nil)
+            }
             .sheet(isPresented: $showingDiagnostics) { DiagnosticsView(model: model) }
         }
     }
@@ -270,6 +285,7 @@ private struct DeviceView: View {
 
 private struct DeviceKeyView: View {
     @ObservedObject var model: BluetoothModel
+    var initialImportURL: URL? = nil
     @Environment(\.dismiss) private var dismiss
     @State private var key = ""
     @State private var importing = false
@@ -279,24 +295,47 @@ private struct DeviceKeyView: View {
         NavigationStack {
             Form {
                 Section {
-                    Text(model.selectedDevice?.name ?? model.lastDevice?.name ?? "当前手环").font(.headline)
-                    Text("输入此手环的 AuthKey，或导入从自己的小米运动健康数据中提取的设备密钥文件。密钥只用于手环认证。")
+                    Text(model.selectedDevice?.name ?? model.lastDevice?.name ?? "从设备文件连接手环").font(.headline)
+                    Text("导入自己的设备文件后，选择要连接的手环。带本机蓝牙标识的记录可以直接发起连接，无需等待设备广播。")
                         .font(.subheadline).foregroundStyle(.secondary)
-                    SecureField("32 位十六进制 AuthKey", text: $key)
-                        .textInputAutocapitalization(.never).autocorrectionDisabled()
-                        .privacySensitive()
-                    Button("保存并认证") {
-                        if model.saveDeviceKey(key) { key = ""; candidates.removeAll(); dismiss() }
-                    }.disabled(key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    if model.currentDeviceID != nil {
+                        SecureField("32 位十六进制 AuthKey", text: $key)
+                            .textInputAutocapitalization(.never).autocorrectionDisabled()
+                            .privacySensitive()
+                        Button("保存并认证当前手环") {
+                            if model.saveDeviceKey(key) { key = ""; candidates.removeAll(); dismiss() }
+                        }.disabled(key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    } else {
+                        Text("手动输入密钥或导入不带蓝牙标识的记录，需要先扫描并选择手环。")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
                     Button("从文件导入") { importing = true }
+                    if let localURL = model.pendingDeviceImportURL, candidates.isEmpty {
+                        Button("导入已准备的手环") { loadImport(localURL) }
+                    }
                 } footer: {
-                    Text("保存后绑定当前设备的本机蓝牙标识。不上传至 GitHub，不进入诊断日志或数据导出。")
+                    Text("密钥绑定所选记录的设备标识，不会绑定到另一台当前设备。不上传至 GitHub，不进入诊断日志或数据导出。")
                 }
                 if !candidates.isEmpty {
                     Section("选择当前手环对应的记录") {
                         ForEach(candidates) { candidate in
-                            Button(candidate.label) {
-                                if model.saveDeviceKey(candidate.key) { candidates.removeAll(); key = ""; dismiss() }
+                            Button {
+                                if model.importDeviceRecord(candidate) { candidates.removeAll(); key = ""; dismiss() }
+                            } label: {
+                                VStack(alignment: .leading, spacing: 5) {
+                                    Text(candidate.peripheralID == nil ? candidate.label : "连接 \(candidate.label)")
+                                    if let id = candidate.peripheralID {
+                                        Text("目标设备：\(id.uuidString)")
+                                            .font(.caption2.monospaced()).foregroundStyle(.secondary)
+                                        if model.currentDeviceID != nil && id != model.currentDeviceID {
+                                            Text("将切换到这条记录对应的手环")
+                                                .font(.caption).foregroundStyle(.secondary)
+                                        }
+                                    } else {
+                                        Text("无设备标识，仅可绑定已选择的手环")
+                                            .font(.caption).foregroundStyle(.secondary)
+                                    }
+                                }
                             }
                         }
                     }
@@ -311,19 +350,25 @@ private struct DeviceKeyView: View {
             .fileImporter(isPresented: $importing, allowedContentTypes: [.json, .plainText, .data]) { result in
                 do {
                     let url = try result.get()
-                    let scoped = url.startAccessingSecurityScopedResource()
-                    defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-                    if let size = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize, size > 1_048_576 {
-                        throw DeviceKeyStore.Failure.invalidImport
-                    }
-                    let imported = try DeviceKeyStore.importCandidates(from: Data(contentsOf: url))
-                    candidates = imported
-                    importError = nil
-                    // Even one imported record is shown for an explicit choice;
-                    // importing a file never silently binds another device's key.
+                    loadImport(url)
                 } catch { importError = error.localizedDescription }
+            }
+            .onAppear {
+                if let initialImportURL = initialImportURL { loadImport(initialImportURL) }
             }
             .onDisappear { key = ""; candidates.removeAll() }
         }
+    }
+
+    private func loadImport(_ url: URL) {
+        do {
+            let scoped = url.startAccessingSecurityScopedResource()
+            defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+            if let size = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize, size > 1_048_576 {
+                throw DeviceKeyStore.Failure.invalidImport
+            }
+            candidates = try DeviceKeyStore.importCandidates(from: Data(contentsOf: url))
+            importError = nil
+        } catch { importError = error.localizedDescription }
     }
 }

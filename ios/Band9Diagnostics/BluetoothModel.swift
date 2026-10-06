@@ -115,6 +115,12 @@ final class BluetoothModel: NSObject, ObservableObject {
 
     var currentDeviceID: UUID? { selectedDevice?.id ?? lastDevice?.id }
 
+    var pendingDeviceImportURL: URL? {
+        let url = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("private-band-auth-key.json")
+        return FileManager.default.fileExists(atPath: url.path) ? url : nil
+    }
+
     var coreVersion: String { RustBridge.version }
 
     var appVersion: String {
@@ -764,6 +770,37 @@ extension BluetoothModel {
             log("设备密钥已保存在本机钥匙串。")
             if session != nil { reconnect() }
             else { beginAuthenticationIfPossible() }
+            return true
+        } catch { keyError = error.localizedDescription; return false }
+    }
+
+    func importDeviceRecord(_ candidate: DeviceKeyStore.ImportCandidate) -> Bool {
+        guard !candidate.invalidPeripheralID else {
+            keyError = "这条记录的蓝牙标识格式无效，请重新导出设备文件。"
+            return false
+        }
+        guard let id = candidate.peripheralID else {
+            guard currentDeviceID != nil else {
+                keyError = "这条记录没有本机蓝牙标识，请先扫描并选择对应手环，再导入密钥。"
+                return false
+            }
+            return saveDeviceKey(candidate.key)
+        }
+        do {
+            // The explicit selection binds the key to the record's UUID, never
+            // to a different device that happened to be selected previously.
+            try DeviceKeyStore.save(candidate.key, for: id)
+            let device = ScanDevice(id: id, name: candidate.deviceName ?? candidate.label,
+                                    rssi: nil, advertisedServices: [], lastSeen: Date())
+            resetReport()
+            selectedDevice = device
+            lastDevice = device
+            if let stored = try? JSONEncoder().encode(device) { UserDefaults.standard.set(stored, forKey: "band9.last-device") }
+            hasStoredKey = true
+            keyError = nil
+            automaticReconnectAttempts = 0
+            log("已选择设备文件中的记录，密钥保存在该设备对应的本机钥匙串。")
+            request(.connect(id))
             return true
         } catch { keyError = error.localizedDescription; return false }
     }

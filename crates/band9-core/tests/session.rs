@@ -330,6 +330,71 @@ fn ready_peer_restart_requires_fresh_nonce_instead_of_reusing_old_keys() {
     assert!(session.start(7).error.is_some());
 }
 
+#[test]
+fn session_reopened_after_pairing_requires_fresh_nonce_at_both_auth_stages() {
+    for proof_sent in [false, true] {
+        let mut session = Session::new(options()).unwrap();
+        negotiated(&mut session);
+        if proof_sent {
+            assert_eq!(
+                session.receive(&peer(&watch_nonce(), 39, false), 2).state,
+                "awaiting_auth"
+            );
+        }
+        let prompt = session.receive(&peer(&proto::command(1, 16, None), 40, false), 3);
+        assert!(prompt.events.iter().any(|e| e.kind == "pairing_required"));
+        let response = frame::build_frame(2, 0, &[2]).unwrap();
+        let update = session.receive(&response, 4);
+        assert_eq!(update.state, "failed");
+        let event = update
+            .events
+            .iter()
+            .find(|e| e.kind == "reconnect_required")
+            .unwrap();
+        assert_eq!(event.data["fresh_nonce_required"], true);
+        assert!(update.outbound.is_empty());
+        assert!(session.start(5).error.is_some());
+        assert!(session
+            .receive(&peer(&watch_nonce(), 41, false), 6)
+            .error
+            .is_some());
+        assert!(session.tick(120_000).outbound.is_empty());
+    }
+}
+
+#[test]
+fn ordinary_duplicate_session_accept_does_not_restart_an_active_handshake() {
+    let mut session = Session::new(options()).unwrap();
+    negotiated(&mut session);
+    let response = frame::build_frame(2, 0, &[2]).unwrap();
+    let duplicate = session.receive(&response, 2);
+    assert_eq!(duplicate.state, "awaiting_nonce");
+    assert!(duplicate.outbound.is_empty());
+    assert!(duplicate.error.is_none());
+    assert!(!duplicate
+        .events
+        .iter()
+        .any(|e| e.kind == "reconnect_required"));
+    assert_eq!(
+        session.receive(&peer(&watch_nonce(), 40, false), 3).state,
+        "awaiting_auth"
+    );
+    let duplicate = session.receive(&response, 4);
+    assert_eq!(duplicate.state, "awaiting_auth");
+    assert!(duplicate.outbound.is_empty());
+    assert!(duplicate.error.is_none());
+    assert!(!duplicate
+        .events
+        .iter()
+        .any(|e| e.kind == "reconnect_required"));
+    assert_eq!(
+        session
+            .receive(&peer(&proto::command(1, 27, None), 41, false), 5)
+            .state,
+        "ready"
+    );
+}
+
 fn unknown_file(timestamp: u32) -> Vec<u8> {
     let mut raw = timestamp.to_le_bytes().to_vec();
     raw.extend_from_slice(&[32, 99, 0, 0]);

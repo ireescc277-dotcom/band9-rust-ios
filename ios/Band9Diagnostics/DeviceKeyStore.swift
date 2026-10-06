@@ -56,6 +56,8 @@ enum DeviceKeyStore {
         let label: String
         let key: String
         var peripheralID: UUID? = nil
+        var deviceName: String? = nil
+        var invalidPeripheralID = false
     }
     static func importCandidates(from data: Data) throws -> [ImportCandidate] {
         guard data.count <= 1_048_576 else { throw Failure.invalidImport }
@@ -72,7 +74,9 @@ enum DeviceKeyStore {
                         let name = (object["name"] as? String) ?? (object["device_name"] as? String) ?? "设备记录 \(result.count + 1)"
                         let address = (object["mac"] as? String) ?? (object["mac_address"] as? String)
                         let peripheralID = (object["peripheral_id"] as? String).flatMap(UUID.init(uuidString:))
-                        result.append(ImportCandidate(label: address.map { "\(name) · \($0)" } ?? name, key: key, peripheralID: peripheralID))
+                        let invalidID = object["peripheral_id"] != nil && peripheralID == nil
+                        result.append(ImportCandidate(label: address.map { "\(name) · \($0)" } ?? name, key: key,
+                                                      peripheralID: peripheralID, deviceName: name, invalidPeripheralID: invalidID))
                         break
                     }
                 }
