@@ -1,374 +1,468 @@
-import Charts
 import SwiftUI
-import UniformTypeIdentifiers
+
+enum AppExperience: String, CaseIterable, Identifiable {
+    case watch, health, data
+    var id: String { rawValue }
+    var title: String {
+        switch self { case .watch: return "Watch 管理版"; case .health: return "健康生活版"; case .data: return "数据分析版" }
+    }
+    var subtitle: String {
+        switch self {
+        case .watch: return "设备、表盘、设置。熟悉的 Watch 布局。"
+        case .health: return "从今天出发，看活动、睡眠与日常记录。"
+        case .data: return "查看历史趋势、样本覆盖和本地数据。"
+        }
+    }
+    var symbol: String {
+        switch self { case .watch: return "applewatch"; case .health: return "heart.text.square.fill"; case .data: return "chart.xyaxis.line" }
+    }
+    var accent: Color {
+        switch self { case .watch: return .orange; case .health: return Color(red: 0.02, green: 0.55, blue: 0.48); case .data: return .cyan }
+    }
+}
 
 struct ContentView: View {
     @ObservedObject var model: BluetoothModel
+    @StateObject private var library = FaceLibrary()
+    @AppStorage("watch.experience") private var experienceValue = AppExperience.watch.rawValue
+    @AppStorage("watch.tab") private var watchTab = 0
+    @State private var showingExperiences = false
+    private var experience: AppExperience { AppExperience(rawValue: experienceValue) ?? .watch }
+
     var body: some View {
-        TabView {
-            HealthDashboard(model: model, archive: model.archive)
-                .tabItem { Label("今天", systemImage: "heart.text.square") }
-            HealthHistory(model: model, archive: model.archive)
-                .tabItem { Label("记录", systemImage: "clock.arrow.circlepath") }
-            DeviceView(model: model, archive: model.archive)
-                .tabItem { Label("手环", systemImage: "applewatch") }
+        Group {
+            switch experience {
+            case .watch: watchTabs
+            case .health: healthTabs
+            case .data: dataTabs
+            }
         }
-        .tint(.teal)
+        .tint(experience.accent).accentColor(experience.accent)
+        .preferredColorScheme(experience == .health ? .light : .dark)
+        .sheet(isPresented: $showingExperiences) { ExperiencePicker(selection: $experienceValue) }
+    }
+
+    private var watchTabs: some View {
+        TabView(selection: $watchTab) {
+            NavigationStack {
+                MyWatchView(model: model, archive: model.archive, library: library)
+                    .toolbar { experienceButton }
+            }.tabItem { Label("我的手表", systemImage: "applewatch") }.tag(0)
+            FaceGalleryView(library: library, model: model)
+                .tabItem { Label("表盘图库", systemImage: "square.grid.2x2.fill") }.tag(1)
+            NavigationStack {
+                DiscoverView().toolbar { experienceButton }
+            }.tabItem { Label("发现", systemImage: "safari") }.tag(2)
+        }
+    }
+
+    private var healthTabs: some View {
+        TabView {
+            NavigationStack {
+                HealthOverviewView(model: model, archive: model.archive, showConnections: true)
+                    .toolbar { experienceButton }
+            }.tabItem { Label("今天", systemImage: "heart.fill") }
+            NavigationStack {
+                HealthRecordsView(model: model, archive: model.archive).toolbar { experienceButton }
+            }.tabItem { Label("记录", systemImage: "calendar") }
+            NavigationStack {
+                DeviceControlView(model: model, archive: model.archive).toolbar { experienceButton }
+            }.tabItem { Label("我的手环", systemImage: "applewatch") }
+        }
+    }
+
+    private var dataTabs: some View {
+        TabView {
+            NavigationStack {
+                AnalyticsView(model: model, archive: model.archive).toolbar { experienceButton }
+            }.tabItem { Label("概览", systemImage: "chart.bar.xaxis") }
+            NavigationStack {
+                HealthRecordsView(model: model, archive: model.archive).toolbar { experienceButton }
+            }.tabItem { Label("数据", systemImage: "list.bullet.rectangle.portrait") }
+            NavigationStack {
+                DeviceControlView(model: model, archive: model.archive).toolbar { experienceButton }
+            }.tabItem { Label("设备", systemImage: "sensor.tag.radiowaves.forward") }
+        }
+    }
+
+    @ToolbarContentBuilder private var experienceButton: some ToolbarContent {
+        ToolbarItem(placement: .topBarTrailing) {
+            Button { showingExperiences = true } label: { Image(systemName: "square.stack.3d.up") }
+                .accessibilityLabel("切换三种界面")
+        }
     }
 }
 
-private struct HealthDashboard: View {
-    @ObservedObject var model: BluetoothModel
-    @ObservedObject var archive: HealthArchive
-    @State private var showingLocalImport = false
-    private let columns = [GridItem(.flexible()), GridItem(.flexible())]
-    private var records: [HealthRecord] { archive.records(for: model.currentDeviceID) }
-    private var heartRecords: [HealthRecord] {
-        Array(records.filter { $0.kind == "heart_rate" && $0.value != nil }.prefix(30).reversed())
-    }
-    private var latestHeart: HealthRecord? { records.first { $0.kind == "heart_rate" } }
-    private var latestOxygen: HealthRecord? { records.first { $0.kind == "spo2" } }
-
+struct ExperiencePicker: View {
+    @Binding var selection: String
+    @Environment(\.dismiss) private var dismiss
     var body: some View {
         NavigationStack {
             ScrollView {
-                VStack(alignment: .leading, spacing: 20) {
-                    HStack {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(Date(), format: .dateTime.month().day().weekday(.wide))
-                                .font(.subheadline).foregroundStyle(.secondary)
-                            Text("好好生活，慢慢记录。")
-                                .font(.title2.bold())
-                        }
-                        Spacer()
-                        Image(systemName: "figure.walk.circle.fill").font(.system(size: 44)).foregroundStyle(.teal)
-                    }
-                    connectionCard
-                    LazyVGrid(columns: columns, spacing: 14) {
-                        metric("今日步数", icon: "figure.walk", color: .teal,
-                               value: archive.steps(on: Date(), device: model.currentDeviceID).map { String(Int($0)) },
-                               unit: "步", detail: "每日总数优先，避免重复累计")
-                        metric("昨夜睡眠", icon: "moon.zzz.fill", color: .indigo,
-                               value: archive.sleepDuration(endingOn: Date(), device: model.currentDeviceID).map {
-                                   "\(Int($0) / 3600)时\((Int($0) % 3600) / 60)分"
-                               }, unit: "", detail: "昨晚18:00至今天18:00")
-                        metric("最近心率", icon: "heart.fill", color: .pink,
-                               value: latestHeart?.value.map { String(Int($0)) }, unit: "次/分",
-                               detail: latestHeart.map { $0.date.formatted(date: .abbreviated, time: .shortened) } ?? "等待同步")
-                        metric("最近血氧", icon: "drop.fill", color: .blue,
-                               value: latestOxygen?.value.map { String(Int($0)) }, unit: "%",
-                               detail: latestOxygen.map { $0.date.formatted(date: .abbreviated, time: .shortened) } ?? "等待同步")
-                    }
-                    Text("睡眠按昨晚 18:00 至今天 18:00 统计，仅累计手环明确记录的浅睡、深睡与快速眼动时段。")
-                        .font(.caption).foregroundStyle(.secondary)
-                    if !heartRecords.isEmpty {
-                        VStack(alignment: .leading, spacing: 15) {
-                            Label("最近心率记录", systemImage: "waveform.path.ecg").font(.headline)
-                            Chart(heartRecords) { record in
-                                if let value = record.value {
-                                    LineMark(x: .value("时间", record.date), y: .value("心率", value))
-                                        .foregroundStyle(.pink)
-                                    PointMark(x: .value("时间", record.date), y: .value("心率", value))
-                                        .foregroundStyle(.pink).symbolSize(18)
+                VStack(alignment: .leading, spacing: 16) {
+                    Text("同一只手环，三种视角。")
+                        .font(.title2.bold()).padding(.bottom, 4)
+                    ForEach(AppExperience.allCases) { item in
+                        Button {
+                            selection = item.rawValue
+                            dismiss()
+                        } label: {
+                            HStack(spacing: 18) {
+                                Image(systemName: item.symbol).font(.system(size: 32)).foregroundStyle(item.accent).frame(width: 48)
+                                VStack(alignment: .leading, spacing: 8) {
+                                    Text(item.title).font(.headline).foregroundStyle(.primary)
+                                    Text(item.subtitle).font(.subheadline).foregroundStyle(.secondary)
                                 }
-                            }
-                            .frame(height: 150)
-                            .chartYAxisLabel("次/分")
-                        }
-                        .padding().background(.background, in: RoundedRectangle(cornerRadius: 20))
+                                Spacer(minLength: 0)
+                                if selection == item.rawValue { Image(systemName: "checkmark.circle.fill").foregroundStyle(item.accent) }
+                            }.padding(22).background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 22))
+                        }.buttonStyle(.plain)
                     }
-                    if records.isEmpty {
-                        ContentUnavailableView("等待第一份记录", systemImage: "heart.text.square",
-                                               description: Text("在“手环”中连接设备并添加设备密钥，再点同步。这里会显示实际收到的数据。"))
-                            .padding(.vertical, 5)
-                    }
-                    if let error = archive.lastError { Text(error).font(.caption).foregroundStyle(.red) }
-                    Text("健康记录仅保存在这台手机，当前未写入 Apple 健康。")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-                .padding()
-            }
-            .background(Color(uiColor: .systemGroupedBackground))
-            .navigationTitle("今天")
-            .sheet(isPresented: $showingLocalImport) {
-                DeviceKeyView(model: model, initialImportURL: model.pendingDeviceImportURL)
-            }
+                    Text("切换界面会保留设备连接、密钥、健康记录和收藏。")
+                        .font(.footnote).foregroundStyle(.secondary).padding(.horizontal, 6)
+                }.padding(20)
+            }.background(Color(uiColor: .systemGroupedBackground))
+                .navigationTitle("选择你的界面").navigationBarTitleDisplayMode(.inline)
+                .toolbar { ToolbarItem(placement: .confirmationAction) { Button("完成") { dismiss() } } }
         }
-    }
-
-    private var connectionCard: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Image(systemName: "applewatch").font(.title2).foregroundStyle(.teal)
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(model.selectedDevice?.name ?? model.lastDevice?.name ?? "连接你的手环").font(.headline)
-                    Text(model.isAuthenticated ? "已认证 · 数据保存在本机" : model.authState)
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-                Spacer()
-                if let battery = model.batteryLevel {
-                    Label("\(battery)%", systemImage: "battery.75percent").font(.caption).foregroundStyle(.secondary)
-                }
-            }
-            Text(model.syncMessage).font(.caption).foregroundStyle(.secondary)
-            if model.pendingDeviceImportURL != nil {
-                Button("导入已准备的手环") { showingLocalImport = true }
-                    .font(.subheadline.weight(.semibold))
-            }
-            Button(action: model.isAuthenticated ? model.syncHealth : model.reconnect) {
-                HStack {
-                    if model.isSyncing { ProgressView().tint(.white) }
-                    Text(model.isSyncing ? "正在同步…" : (model.isAuthenticated ? "同步健康数据" : "连接手环"))
-                        .fontWeight(.semibold)
-                    Spacer()
-                    Image(systemName: model.isAuthenticated ? "arrow.triangle.2.circlepath" : "arrow.right")
-                }
-                .padding(12)
-            }
-            .buttonStyle(.borderedProminent).disabled(model.isSyncing)
-        }
-        .padding().background(.background, in: RoundedRectangle(cornerRadius: 20))
-    }
-
-    private func metric(_ title: String, icon: String, color: Color, value: String?, unit: String, detail: String) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Label(title, systemImage: icon).font(.subheadline.weight(.medium)).foregroundStyle(color)
-            HStack(alignment: .firstTextBaseline, spacing: 4) {
-                Text(value ?? "—").font(.system(size: 27, weight: .bold, design: .rounded)).minimumScaleFactor(0.6).lineLimit(1)
-                if value != nil { Text(unit).font(.caption).foregroundStyle(.secondary) }
-            }
-            Text(value == nil ? "暂无同步数据" : detail).font(.caption2).foregroundStyle(.secondary).lineLimit(2)
-        }
-        .frame(maxWidth: .infinity, minHeight: 116, alignment: .leading)
-        .padding(14).background(.background, in: RoundedRectangle(cornerRadius: 20))
     }
 }
 
-private struct HealthHistory: View {
+private enum WatchRoute: String, CaseIterable, Identifiable {
+    case connection, health, records, general, battery, storage, privacy, capabilities
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .connection: return "连接与同步"; case .health: return "健康"; case .records: return "活动记录"
+        case .general: return "通用"; case .battery: return "电池"; case .storage: return "数据与导出"
+        case .privacy: return "隐私"; case .capabilities: return "功能与数据"
+        }
+    }
+    var symbol: String {
+        switch self {
+        case .connection: return "arrow.triangle.2.circlepath"; case .health: return "heart.fill"; case .records: return "figure.walk"
+        case .general: return "gearshape.fill"; case .battery: return "battery.100percent"; case .storage: return "externaldrive.fill"
+        case .privacy: return "hand.raised.fill"; case .capabilities: return "square.grid.2x2.fill"
+        }
+    }
+    var color: Color {
+        switch self {
+        case .connection: return .blue; case .health: return .pink; case .records: return .green
+        case .general: return .gray; case .battery: return .green; case .storage: return .orange
+        case .privacy: return .blue; case .capabilities: return .purple
+        }
+    }
+}
+
+private struct MyWatchView: View {
     @ObservedObject var model: BluetoothModel
     @ObservedObject var archive: HealthArchive
-    @State private var filter = "all"
-    private var records: [HealthRecord] {
-        archive.records(for: model.currentDeviceID).filter { filter == "all" || $0.kind == filter }
-    }
+    @ObservedObject var library: FaceLibrary
+    @State private var query = ""
+    private var routes: [WatchRoute] { WatchRoute.allCases.filter { query.isEmpty || $0.title.localizedCaseInsensitiveContains(query) } }
     var body: some View {
-        NavigationStack {
-            List {
-                Section {
-                    Picker("记录类型", selection: $filter) {
-                        Text("全部").tag("all")
-                        Text("步数").tag("steps")
-                        Text("睡眠").tag("sleep")
-                        Text("心率").tag("heart_rate")
-                        Text("血氧").tag("spo2")
-                    }
-                }
-                if records.isEmpty {
-                    ContentUnavailableView("还没有记录", systemImage: "clock", description: Text("同步后的真实健康记录会按时间保存在这里。"))
-                } else {
-                    Section("最近 \(min(records.count, 500)) 条 · 共 \(records.count) 条") {
-                        ForEach(Array(records.prefix(500))) { record in
-                            HStack {
-                                VStack(alignment: .leading, spacing: 5) {
-                                    Text(record.kind == "sleep" ? record.localizedStage : record.localizedKind).font(.headline)
-                                    Text(record.date, format: .dateTime.year().month().day().hour().minute())
-                                        .font(.caption).foregroundStyle(.secondary)
-                                    if record.aggregation == "daily_total" { Text("当日累计").font(.caption2).foregroundStyle(.secondary) }
-                                }
-                                Spacer()
-                                if record.kind == "sleep" {
-                                    Text("\(Int(record.endTime >= record.startTime ? record.endTime - record.startTime : 0) / 60) 分钟")
-                                } else if let value = record.value {
-                                    Text("\(value.formatted(.number.precision(.fractionLength(0...1)))) \(record.localizedUnit)")
+        ScrollView {
+            VStack(alignment: .leading, spacing: 26) {
+                if query.isEmpty {
+                    NavigationLink {
+                        DeviceControlView(model: model, archive: archive)
+                    } label: {
+                        HStack(spacing: 16) {
+                            MiniBandArtwork().frame(width: 56, height: 82)
+                            VStack(alignment: .leading, spacing: 6) {
+                                Text(model.selectedDevice?.name ?? model.lastDevice?.name ?? "添加你的手环").font(.headline).foregroundStyle(.primary)
+                                Text(model.isAuthenticated ? "已连接" : "点此连接与管理")
+                                    .font(.subheadline).foregroundStyle(.secondary)
+                                if let battery = model.batteryLevel {
+                                    Label("\(battery)%", systemImage: "battery.100percent").font(.caption).foregroundStyle(.green)
                                 }
                             }
-                            .font(.subheadline)
-                        }
-                    }
+                            Spacer(minLength: 0)
+                            Image(systemName: "chevron.right").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                        }.padding(18).background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 18))
+                    }.buttonStyle(.plain)
+                    SavedFacesRow(library: library, model: model)
                 }
-            }
-            .navigationTitle("健康记录")
+                VStack(spacing: 0) {
+                    ForEach(routes) { route in
+                        NavigationLink { destination(route) } label: {
+                            HStack(spacing: 13) {
+                                SettingIcon(symbol: route.symbol, color: route.color)
+                                Text(route.title).foregroundStyle(.primary)
+                                Spacer()
+                                Image(systemName: "chevron.right").font(.caption.weight(.semibold)).foregroundStyle(.tertiary)
+                            }.padding(.horizontal, 16).padding(.vertical, 12)
+                        }.buttonStyle(.plain)
+                        if route != routes.last { Divider().padding(.leading, 60) }
+                    }
+                }.background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 13))
+                if routes.isEmpty { ContentUnavailableView.search(text: query) }
+                if query.isEmpty {
+                    Text("为你的小米手环而设计。")
+                        .font(.footnote).foregroundStyle(.secondary).frame(maxWidth: .infinity).padding(.bottom, 10)
+                }
+            }.padding(20)
+        }.background(Color.black).navigationTitle("我的手表")
+            .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .automatic), prompt: "搜索设置")
+            .toolbar { ToolbarItem(placement: .topBarLeading) {
+                NavigationLink("所有手表") { DeviceControlView(model: model, archive: archive) }.font(.subheadline)
+            } }
+    }
+
+    @ViewBuilder private func destination(_ route: WatchRoute) -> some View {
+        switch route {
+        case .connection: DeviceControlView(model: model, archive: archive)
+        case .health: HealthOverviewView(model: model, archive: archive)
+        case .records: HealthRecordsView(model: model, archive: archive)
+        case .general: GeneralSettingsView(model: model)
+        case .battery: BatteryView(model: model)
+        case .storage: DataStorageView(model: model, archive: archive)
+        case .privacy: PrivacyView()
+        case .capabilities: CapabilitiesView()
         }
     }
 }
 
-private struct DeviceView: View {
+struct SettingIcon: View {
+    let symbol: String
+    let color: Color
+    var body: some View {
+        Image(systemName: symbol).font(.system(size: 17, weight: .medium)).foregroundStyle(.white)
+            .frame(width: 31, height: 31).background(color.gradient, in: RoundedRectangle(cornerRadius: 7))
+    }
+}
+
+struct MiniBandArtwork: View {
+    var body: some View {
+        ZStack {
+            Capsule().fill(Color(white: 0.72)).frame(width: 24)
+            Capsule().fill(LinearGradient(colors: [.white, .gray, .white], startPoint: .topLeading, endPoint: .bottomTrailing)).frame(width: 46, height: 72)
+            Capsule().fill(.black).frame(width: 39, height: 65)
+            VStack(spacing: 1) {
+                Text("09").foregroundStyle(.orange)
+                Text("41").foregroundStyle(.white)
+            }.font(.system(size: 22, weight: .semibold, design: .rounded))
+        }.accessibilityHidden(true)
+    }
+}
+
+struct DeviceControlView: View {
     @ObservedObject var model: BluetoothModel
     @ObservedObject var archive: HealthArchive
     @State private var showingKey = false
+    @State private var usePreparedKey = false
     @State private var showingDiagnostics = false
-    @State private var loadLocalImport = false
-    private var deviceFiles: [ArchivedHealthFile] { archive.files.filter { $0.deviceID == model.currentDeviceID } }
-
     var body: some View {
-        NavigationStack {
-            List {
-                Section("当前手环") {
-                    Label(model.selectedDevice?.name ?? model.lastDevice?.name ?? "尚未选择手环", systemImage: "applewatch")
-                        .font(.headline)
-                    Text(model.status).font(.subheadline).foregroundStyle(.secondary)
-                    LabeledContent("认证", value: model.authState)
-                    if let battery = model.batteryLevel { LabeledContent("电量", value: "\(battery)%") }
-                    if let firmware = model.firmware { LabeledContent("固件", value: firmware) }
-                    if model.currentDeviceID != nil {
-                        Button(model.hasStoredKey ? "更新设备密钥" : "添加设备密钥") { loadLocalImport = false; showingKey = true }
-                        Button("重新连接", action: model.reconnect)
+        List {
+            Section {
+                HStack(spacing: 18) {
+                    MiniBandArtwork().frame(width: 55, height: 90)
+                    VStack(alignment: .leading, spacing: 7) {
+                        Text(model.selectedDevice?.name ?? model.lastDevice?.name ?? "尚未添加手环").font(.headline)
+                        Label(model.isAuthenticated ? "已连接并认证" : model.authState, systemImage: model.isAuthenticated ? "checkmark.circle.fill" : "circle.dashed")
+                            .font(.caption).foregroundStyle(model.isAuthenticated ? Color.green : Color.secondary)
+                        if let battery = model.batteryLevel { Text("电量 \(battery)%").font(.caption).foregroundStyle(.secondary) }
                     }
-                    if model.isConnected || model.isBusy { Button("断开连接", role: .destructive, action: model.disconnect) }
+                }.padding(.vertical, 12)
+                Text(model.status).font(.footnote).foregroundStyle(.secondary)
+                Button(model.isAuthenticated ? "同步健康数据" : "连接手环") {
+                    if model.isAuthenticated { model.syncHealth() } else { model.reconnect() }
+                }.disabled(model.isSyncing || model.isBusy)
+                if model.isSyncing { Label(model.syncMessage, systemImage: "arrow.triangle.2.circlepath").font(.caption) }
+                if model.isConnected || model.isBusy { Button("断开连接", role: .destructive, action: model.disconnect) }
+            }
+            Section("添加与配对") {
+                Button("从设备文件连接") { usePreparedKey = false; showingKey = true }
+                if model.pendingDeviceImportURL != nil {
+                    Button("导入已准备的手环") { usePreparedKey = true; showingKey = true }
                 }
-                Section {
-                    Button("从设备文件连接") { loadLocalImport = false; showingKey = true }
-                    if model.pendingDeviceImportURL != nil {
-                        Button("导入已准备的手环") { loadLocalImport = true; showingKey = true }
-                    }
-                    Button(action: model.scan) { Label(model.isScanning ? "重新查找手环" : "查找附近手环", systemImage: "magnifyingglass") }
-                    if model.isScanning {
-                        HStack { ProgressView(); Text("正在扫描，最多 15 秒…").font(.caption) }
-                        Button("停止扫描", action: model.stopScan)
-                    }
-                    ForEach(model.devices) { device in
-                        Button { model.connect(device) } label: {
-                            HStack {
-                                VStack(alignment: .leading, spacing: 4) {
-                                    Text(device.name).foregroundStyle(.primary)
-                                    Text(device.systemConnected == true ? "系统已连接 · 可直接连接" : (device.rssi.map { "信号 \($0) dBm" } ?? "附近蓝牙设备"))
-                                        .font(.caption).foregroundStyle(.secondary)
-                                    Text(String(device.id.uuidString.prefix(8))).font(.caption2.monospaced()).foregroundStyle(.secondary)
-                                }
-                                Spacer()
-                                Image(systemName: "chevron.right").font(.caption)
+                Button(model.isScanning ? "重新查找附近手环" : "查找附近手环", action: model.scan)
+                if model.isScanning { HStack { ProgressView(); Text("正在查找附近设备…").font(.caption) }; Button("停止查找", action: model.stopScan) }
+                ForEach(model.devices) { device in
+                    Button { model.connect(device) } label: {
+                        HStack {
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(device.name).foregroundStyle(.primary)
+                                Text(device.systemConnected == true ? "系统已连接" : "附近的蓝牙设备").font(.caption).foregroundStyle(.secondary)
                             }
-                        }
-                    }
-                } header: { Text("发现设备 · \(model.devices.count)") }
-                footer: { Text("同时查找系统已经连接的手环与正在广播的设备。系统蓝牙已连接后，仍需在这里选择并完成应用认证。") }
-                Section("同步与本机数据") {
-                    Button("同步健康数据", action: model.syncHealth).disabled(!model.isAuthenticated || model.isSyncing)
-                    Button("刷新电量", action: model.refreshBattery).disabled(!model.isAuthenticated)
-                    Text(model.syncMessage).font(.caption).foregroundStyle(.secondary)
-                    LabeledContent("已保存文件", value: "\(deviceFiles.count)")
-                    Button("生成原始数据导出", action: model.exportHealth).disabled(deviceFiles.isEmpty)
-                    if let url = model.healthExportURL {
-                        ShareLink(item: url) { Label("分享健康数据文件", systemImage: "square.and.arrow.up") }
-                        Text("包含原始健康数据和设备标识，分享前请确认接收对象。不会包含设备密钥。")
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
-                    if let error = model.exportError { Text(error).font(.caption).foregroundStyle(.red) }
-                    if !deviceFiles.isEmpty {
-                        NavigationLink("查看原始文件记录") {
-                            List(deviceFiles) { file in
-                                VStack(alignment: .leading, spacing: 5) {
-                                    Text(file.fileID).font(.caption.monospaced())
-                                    Text("\(file.byteCount) 字节 · \(file.recordCount) 条记录").font(.subheadline)
-                                    Text(file.parseStatus == "supported" ? "已解析" : "原始数据已保存，暂未完整解析").font(.caption).foregroundStyle(.secondary)
-                                    if let reason = file.parseReason { Text(reason).font(.caption).foregroundStyle(.secondary) }
-                                }
-                            }.navigationTitle("原始健康文件")
+                            Spacer()
+                            if device.id == model.currentDeviceID { Image(systemName: "checkmark").foregroundStyle(.tint) }
                         }
                     }
                 }
-                Section {
-                    Button("连接诊断与日志") { showingDiagnostics = true }
-                    LabeledContent("版本", value: model.appVersion)
-                    Text("密钥保存在系统钥匙串，仅此手机可读取。健康记录保存在本机；当前尚未接入 Apple 健康。")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
             }
-            .navigationTitle("我的手环")
-            .sheet(isPresented: $showingKey) {
-                DeviceKeyView(model: model, initialImportURL: loadLocalImport ? model.pendingDeviceImportURL : nil)
+            Section("手环管理") {
+                NavigationLink { GeneralSettingsView(model: model) } label: { Label("通用", systemImage: "gearshape") }
+                NavigationLink { BatteryView(model: model) } label: { Label("电池", systemImage: "battery.100percent") }
+                NavigationLink { DataStorageView(model: model, archive: archive) } label: { Label("数据与导出", systemImage: "externaldrive") }
+                if model.currentDeviceID != nil { Button("管理设备密钥") { usePreparedKey = false; showingKey = true } }
             }
+            Section {
+                NavigationLink("功能与数据") { CapabilitiesView() }
+                Button("连接诊断与日志") { model.prepareExport(); showingDiagnostics = true }
+            }
+        }.navigationTitle("所有手表")
+            .sheet(isPresented: $showingKey) { DeviceKeyView(model: model, initialImportURL: usePreparedKey ? model.pendingDeviceImportURL : nil) }
             .sheet(isPresented: $showingDiagnostics) { DiagnosticsView(model: model) }
-        }
     }
 }
 
-private struct DeviceKeyView: View {
+private struct GeneralSettingsView: View {
     @ObservedObject var model: BluetoothModel
-    var initialImportURL: URL? = nil
-    @Environment(\.dismiss) private var dismiss
-    @State private var key = ""
-    @State private var importing = false
-    @State private var importError: String?
-    @State private var candidates: [DeviceKeyStore.ImportCandidate] = []
+    @AppStorage("watch.experience") private var experienceValue = AppExperience.watch.rawValue
+    @AppStorage("watch.stepGoal") private var stepGoal = 8000
     var body: some View {
-        NavigationStack {
-            Form {
-                Section {
-                    Text(model.selectedDevice?.name ?? model.lastDevice?.name ?? "从设备文件连接手环").font(.headline)
-                    Text("导入自己的设备文件后，选择要连接的手环。带本机蓝牙标识的记录可以直接发起连接，无需等待设备广播。")
-                        .font(.subheadline).foregroundStyle(.secondary)
-                    if model.currentDeviceID != nil {
-                        SecureField("32 位十六进制 AuthKey", text: $key)
-                            .textInputAutocapitalization(.never).autocorrectionDisabled()
-                            .privacySensitive()
-                        Button("保存并认证当前手环") {
-                            if model.saveDeviceKey(key) { key = ""; candidates.removeAll(); dismiss() }
-                        }.disabled(key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                    } else {
-                        Text("手动输入密钥或导入不带蓝牙标识的记录，需要先扫描并选择手环。")
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
-                    Button("从文件导入") { importing = true }
-                    if let localURL = model.pendingDeviceImportURL, candidates.isEmpty {
-                        Button("导入已准备的手环") { loadImport(localURL) }
-                    }
-                } footer: {
-                    Text("密钥绑定所选记录的设备标识，不会绑定到另一台当前设备。不上传至 GitHub，不进入诊断日志或数据导出。")
-                }
-                if !candidates.isEmpty {
-                    Section("选择当前手环对应的记录") {
-                        ForEach(candidates) { candidate in
-                            Button {
-                                if model.importDeviceRecord(candidate) { candidates.removeAll(); key = ""; dismiss() }
-                            } label: {
-                                VStack(alignment: .leading, spacing: 5) {
-                                    Text(candidate.peripheralID == nil ? candidate.label : "连接 \(candidate.label)")
-                                    if let id = candidate.peripheralID {
-                                        Text("目标设备：\(id.uuidString)")
-                                            .font(.caption2.monospaced()).foregroundStyle(.secondary)
-                                        if model.currentDeviceID != nil && id != model.currentDeviceID {
-                                            Text("将切换到这条记录对应的手环")
-                                                .font(.caption).foregroundStyle(.secondary)
-                                        }
-                                    } else {
-                                        Text("无设备标识，仅可绑定已选择的手环")
-                                            .font(.caption).foregroundStyle(.secondary)
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                if let error = importError ?? model.keyError { Text(error).foregroundStyle(.red).font(.caption) }
-                if model.hasStoredKey {
-                    Section { Button("删除本机保存的密钥", role: .destructive) { model.removeDeviceKey(); dismiss() } }
-                }
+        Form {
+            Section("关于本机") {
+                LabeledContent("名称", value: model.selectedDevice?.name ?? model.lastDevice?.name ?? "尚未选择")
+                if let name = model.modelName { LabeledContent("型号", value: name) }
+                if let firmware = model.firmware { LabeledContent("固件版本", value: firmware) }
+                LabeledContent("App 版本", value: model.appVersion)
             }
-            .navigationTitle("设备密钥")
-            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("关闭") { key = ""; candidates.removeAll(); dismiss() } } }
-            .fileImporter(isPresented: $importing, allowedContentTypes: [.json, .plainText, .data]) { result in
-                do {
-                    let url = try result.get()
-                    loadImport(url)
-                } catch { importError = error.localizedDescription }
+            Section("界面") {
+                Picker("界面版本", selection: $experienceValue) { ForEach(AppExperience.allCases) { Text($0.title).tag($0.rawValue) } }
             }
-            .onAppear {
-                if let initialImportURL = initialImportURL { loadImport(initialImportURL) }
+            Section {
+                Stepper(value: $stepGoal, in: 1000...50000, step: 500) { LabeledContent("每日步数目标", value: "\(stepGoal) 步") }
+            } header: { Text("本机目标") } footer: { Text("用于 App 内展示进度，不会修改手环里的运动目标。") }
+            Section {
+                NavigationLink("隐私与数据") { PrivacyView() }
+                Link("查看项目与更新", destination: URL(string: "https://github.com/ireescc277-dotcom/band9-rust-ios")!)
             }
-            .onDisappear { key = ""; candidates.removeAll() }
-        }
+        }.navigationTitle("通用").navigationBarTitleDisplayMode(.inline)
     }
+}
 
-    private func loadImport(_ url: URL) {
-        do {
-            let scoped = url.startAccessingSecurityScopedResource()
-            defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-            if let size = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize, size > 1_048_576 {
-                throw DeviceKeyStore.Failure.invalidImport
+private struct BatteryView: View {
+    @ObservedObject var model: BluetoothModel
+    var body: some View {
+        List {
+            Section {
+                VStack(spacing: 18) {
+                    Image(systemName: "battery.100percent").font(.system(size: 62)).foregroundStyle(.green)
+                    Text(model.batteryLevel.map { "\($0)%" } ?? "—").font(.system(size: 58, weight: .semibold, design: .rounded))
+                    Text(model.batteryLevel == nil ? "连接手环后读取电量" : "最近一次从手环读取的电量").font(.footnote).foregroundStyle(.secondary)
+                }.frame(maxWidth: .infinity).padding(.vertical, 28)
+                Button("刷新电量", action: model.refreshBattery).disabled(!model.isAuthenticated)
             }
-            candidates = try DeviceKeyStore.importCandidates(from: Data(contentsOf: url))
-            importError = nil
-        } catch { importError = error.localizedDescription }
+            Section { Text("当前协议没有提供电池健康度或剩余使用时长，这里只显示设备返回的电量。")
+                .font(.footnote).foregroundStyle(.secondary) }
+        }.navigationTitle("电池").navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+struct DataStorageView: View {
+    @ObservedObject var model: BluetoothModel
+    @ObservedObject var archive: HealthArchive
+    private var files: [ArchivedHealthFile] { archive.files.filter { $0.deviceID == model.currentDeviceID } }
+    var body: some View {
+        List {
+            Section("本机资料") {
+                LabeledContent("健康记录", value: "\(archive.records(for: model.currentDeviceID).count) 条")
+                LabeledContent("原始文件", value: "\(files.count) 份")
+                LabeledContent("原始文件大小", value: ByteCountFormatter.string(fromByteCount: Int64(files.reduce(0) { $0 + $1.byteCount }), countStyle: .file))
+                if let date = files.first?.receivedAt { LabeledContent("最近同步", value: date.formatted(date: .abbreviated, time: .shortened)) }
+            }
+            Section {
+                Button("准备健康数据导出", action: model.exportHealth).disabled(files.isEmpty)
+                if let url = model.healthExportURL { ShareLink(item: url) { Label("分享健康数据文件", systemImage: "square.and.arrow.up") } }
+                if let error = model.exportError ?? archive.lastError { Text(error).font(.footnote).foregroundStyle(.red) }
+            } footer: { Text("导出包含你的健康记录、原始文件和设备标识，不包含配对密钥。") }
+            Section("已同步文件") {
+                if files.isEmpty { Text("同步后会在这里保存记录。").foregroundStyle(.secondary) }
+                ForEach(files) { file in
+                    VStack(alignment: .leading, spacing: 5) {
+                        HStack { Text(file.receivedAt, style: .date); Spacer(); Text("\(file.recordCount) 条") }
+                        Text(file.parseStatus == "supported" ? "已解析并保存" : "原始文件已保存，格式待适配").font(.caption).foregroundStyle(.secondary)
+                    }.padding(.vertical, 3)
+                }
+            }
+        }.navigationTitle("数据与导出").navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+private struct PrivacyView: View {
+    var body: some View {
+        List {
+            Section("保存在你的手机") {
+                Label("配对密钥存入系统钥匙串", systemImage: "key.fill")
+                Label("健康记录保存在 App 本机目录", systemImage: "iphone")
+                Label("当前没有账号和云端上传", systemImage: "icloud.slash")
+            }
+            Section("由你决定分享") {
+                Text("只有使用“数据与导出”中的分享按钮时，你选择的接收方才会收到导出文件。")
+                Text("当前没有写入 Apple 健康。删除 App 可能同时删除本机健康档案，重要记录请先导出。")
+            }.font(.subheadline)
+        }.navigationTitle("隐私").navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+struct CapabilitiesView: View {
+    var body: some View {
+        List {
+            Section("当前已接入") {
+                capability("活动记录", "步数、距离、活动能量；每日和历史统计。", "figure.walk", .green)
+                capability("连接与电量", "连接、认证、同步、电量读取。", "applewatch", .orange)
+                capability("本机档案", "原始文件、去重记录和主动导出。", "externaldrive", .blue)
+            }
+            Section("收到对应记录后可展示") {
+                capability("心率与血氧", "已实现解析；没有收到样本时显示暂无数据。", "heart.fill", .pink)
+                capability("睡眠", "展示手环明确记录的睡眠阶段和时长。", "moon.fill", .indigo)
+            }
+            Section("待接入") {
+                Text("压力、运动详情、通知与闹钟、天气、手环表盘管理、Apple 健康同步。")
+                Text("图库里的设计目前是本机预览，尚不能安装到手环。")
+            }.font(.subheadline).foregroundStyle(.secondary)
+            Section { Text("本 App 不会用缺失的数据生成恢复评分、身体电量或健康诊断。")
+                .font(.footnote).foregroundStyle(.secondary) }
+        }.navigationTitle("功能与数据").navigationBarTitleDisplayMode(.inline)
+    }
+    private func capability(_ title: String, _ detail: String, _ symbol: String, _ color: Color) -> some View {
+        HStack(alignment: .top, spacing: 13) {
+            SettingIcon(symbol: symbol, color: color)
+            VStack(alignment: .leading, spacing: 5) { Text(title).font(.headline); Text(detail).font(.subheadline).foregroundStyle(.secondary) }
+        }.padding(.vertical, 6)
+    }
+}
+
+private struct DiscoverView: View {
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                Text("让每一份记录，\n都有自己的位置。")
+                    .font(.system(size: 32, weight: .bold)).padding(.top, 8)
+                NavigationLink { CapabilitiesView() } label: {
+                    VStack(alignment: .leading, spacing: 20) {
+                        Image(systemName: "waveform.path.ecg").font(.system(size: 65, weight: .light))
+                        Text("了解你的手环").font(.title2.bold())
+                        Text("哪些记录已经能读到，哪些能力仍在接入。")
+                            .font(.subheadline).opacity(0.85)
+                        Label("查看功能", systemImage: "arrow.right").font(.subheadline.bold())
+                    }.frame(maxWidth: .infinity, alignment: .leading).padding(26)
+                        .foregroundStyle(.white).background(LinearGradient(colors: [.orange, Color(red: 0.65, green: 0.17, blue: 0.12)], startPoint: .topLeading, endPoint: .bottomTrailing), in: RoundedRectangle(cornerRadius: 26))
+                }.buttonStyle(.plain)
+                NavigationLink { GuideView() } label: { guideCard("从连接到同步", detail: "配对一次，让记录留在手机里。", symbol: "arrow.triangle.2.circlepath", color: .blue) }.buttonStyle(.plain)
+                NavigationLink { PrivacyView() } label: { guideCard("数据属于你", detail: "了解本机存储与数据导出。", symbol: "hand.raised.fill", color: .purple) }.buttonStyle(.plain)
+            }.padding(20)
+        }.background(Color.black).navigationTitle("发现")
+    }
+    private func guideCard(_ title: String, detail: String, symbol: String, color: Color) -> some View {
+        HStack(spacing: 18) {
+            Image(systemName: symbol).font(.system(size: 30)).foregroundStyle(color).frame(width: 42)
+            VStack(alignment: .leading, spacing: 6) { Text(title).font(.headline).foregroundStyle(.primary); Text(detail).font(.subheadline).foregroundStyle(.secondary) }
+            Spacer(minLength: 0)
+            Image(systemName: "chevron.right").foregroundStyle(.secondary).font(.caption)
+        }.padding(22).background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 20))
+    }
+}
+
+private struct GuideView: View {
+    var body: some View {
+        List {
+            Section("1 · 添加手环") { Text("进入“所有手表”，导入自己的设备文件或选择附近手环并添加配对密钥。已经添加过的手环无需重复导入。") }
+            Section("2 · 连接与确认") { Text("点击连接；手环或系统出现配对提示时确认。显示“已连接并认证”后即可读取数据。") }
+            Section("3 · 同步记录") { Text("点击“同步健康数据”，同步期间保持 App 在前台。成功后可在健康或记录页面按日期浏览。") }
+            Section("4 · 切换视角") { Text("点击右上角的界面按钮，在 Watch 管理版、健康生活版和数据分析版之间切换。三版共享同一份本机记录。") }
+        }.navigationTitle("使用入门").navigationBarTitleDisplayMode(.inline)
     }
 }

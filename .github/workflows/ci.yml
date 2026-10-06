@@ -74,6 +74,18 @@ jobs:
             build/ios/artifact.json
           if-no-files-found: error
           retention-days: 14
+      - name: Capture the three iPhone Simulator interfaces
+        shell: bash
+        timeout-minutes: 8
+        run: bash scripts/capture-ios-ui.sh
+      - name: Upload Simulator UI screenshots
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: Band9Diagnostics-ui-${{ github.run_number }}
+          path: build/ios/screenshots/
+          if-no-files-found: error
+          retention-days: 14
       - name: Keep iOS build and validation logs
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

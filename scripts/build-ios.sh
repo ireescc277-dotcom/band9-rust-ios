@@ -86,7 +86,7 @@ xcodebuild \
   CODE_SIGNING_REQUIRED=NO \
   CODE_SIGN_IDENTITY= \
   CURRENT_PROJECT_VERSION="$BUILD_NUMBER" \
-  MARKETING_VERSION=0.2.0 \
+  MARKETING_VERSION=0.3.0 \
   build
 
 APP_PATH="$IOS_BUILD_DIR/derived-data/Build/Products/Release-iphoneos/Band9Diagnostics.app"
@@ -133,7 +133,7 @@ with zipfile.ZipFile(ipa) as archive:
         raise RuntimeError("App is not an iPhoneOS device build")
     if str(info.get("CFBundleVersion")) != build_number:
         raise RuntimeError("Build number did not reach Info.plist")
-    if info.get("CFBundleShortVersionString") != "0.2.0":
+    if info.get("CFBundleShortVersionString") != "0.3.0":
         raise RuntimeError("Unexpected marketing version")
     executable = info.get("CFBundleExecutable")
     if executable != "Band9Diagnostics":
@@ -191,7 +191,7 @@ printf '\nCreated: %s\n' "$IOS_BUILD_DIR/Band9Diagnostics-unsigned.ipa"
 printf '%s\n' 'This IPA is unsigned and requires signing before installation on an iPhone.'
 if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
   {
-    printf 'Built **Band9Diagnostics-unsigned.ipa**, version 0.2.0 (%s), for arm64 iPhoneOS.\n\n' "$BUILD_NUMBER"
+    printf 'Built **Band9Diagnostics-unsigned.ipa**, version 0.3.0 (%s), for arm64 iPhoneOS.\n\n' "$BUILD_NUMBER"
     printf '%s\n\n' '**Unsigned: signing is required before installation. No signing credentials were used.**'
     printf '%s\n' 'Verified ZIP integrity, Payload layout, bundle version, executable permissions, arm64 and Mach-O iOS platform.'
     printf '\nSHA-256: `%s`\n' "$(cut -d ' ' -f 1 "$IOS_BUILD_DIR/Band9Diagnostics-unsigned.ipa.sha256")"
