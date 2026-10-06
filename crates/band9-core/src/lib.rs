@@ -6,6 +6,9 @@
 
 pub mod crypto;
 pub mod frame;
+pub mod health;
+pub mod proto;
+pub mod session;
 
 /// CRC-16/ARC (poly 0x8005 reflected, init 0, xorout 0), over payload only.
 pub fn crc16_arc(bytes: &[u8]) -> u16 {

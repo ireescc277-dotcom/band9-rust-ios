@@ -10,6 +10,7 @@ struct Band9DiagnosticsApp: App {
             ContentView(model: bluetooth)
                 .onChange(of: scenePhase) { _, phase in
                     if phase == .background { bluetooth.suspend() }
+                    if phase == .active { bluetooth.resume() }
                 }
         }
     }

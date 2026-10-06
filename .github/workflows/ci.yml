@@ -38,6 +38,7 @@ jobs:
           cargo +"$RUST_TOOLCHAIN" check --workspace --all-targets --locked 2>&1 | tee -a build/logs/rust-checks.log
           cargo +"$RUST_TOOLCHAIN" clippy --workspace --all-targets --locked -- -D warnings 2>&1 | tee -a build/logs/rust-checks.log
           cargo +"$RUST_TOOLCHAIN" test --workspace --all-targets --locked 2>&1 | tee -a build/logs/rust-checks.log
+          python3 -m unittest discover -s scripts -p 'test_*.py' 2>&1 | tee -a build/logs/rust-checks.log
       - name: Keep Rust verification logs
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

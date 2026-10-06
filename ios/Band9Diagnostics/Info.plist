@@ -5,7 +5,7 @@
     <key>CFBundleDevelopmentRegion</key>
     <string>zh_CN</string>
     <key>CFBundleDisplayName</key>
-    <string>手环连接诊断</string>
+    <string>手环伴侣</string>
     <key>CFBundleExecutable</key>
     <string>$(EXECUTABLE_NAME)</string>
     <key>CFBundleIdentifier</key>
@@ -23,7 +23,11 @@
     <key>LSRequiresIPhoneOS</key>
     <true/>
     <key>NSBluetoothAlwaysUsageDescription</key>
-    <string>用于扫描并连接你选择的手环，读取蓝牙服务清单并生成诊断报告。</string>
+    <string>用于连接你选择的手环，认证设备并同步电量、睡眠、活动和其他健康记录到本机。</string>
+    <key>UIFileSharingEnabled</key>
+    <true/>
+    <key>LSSupportsOpeningDocumentsInPlace</key>
+    <true/>
     <key>UILaunchScreen</key>
     <dict/>
     <key>UIApplicationSupportsIndirectInputEvents</key>
@@ -31,6 +35,13 @@
     <key>UISupportedInterfaceOrientations</key>
     <array>
         <string>UIInterfaceOrientationPortrait</string>
+        <string>UIInterfaceOrientationLandscapeLeft</string>
+        <string>UIInterfaceOrientationLandscapeRight</string>
+    </array>
+    <key>UISupportedInterfaceOrientations~ipad</key>
+    <array>
+        <string>UIInterfaceOrientationPortrait</string>
+        <string>UIInterfaceOrientationPortraitUpsideDown</string>
         <string>UIInterfaceOrientationLandscapeLeft</string>
         <string>UIInterfaceOrientationLandscapeRight</string>
     </array>

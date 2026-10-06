@@ -9,6 +9,7 @@ struct ScanDevice: Identifiable, Codable {
     var rssi: Int?
     var advertisedServices: [String]
     var lastSeen: Date
+    var systemConnected: Bool? = nil
 }
 
 struct CharacteristicSnapshot: Identifiable, Codable {
@@ -34,8 +35,8 @@ struct DiagnosticLog: Identifiable, Codable {
     enum CodingKeys: String, CodingKey { case time, message }
 }
 
-// CBCentralManager and all timers use the main queue. No BLE operation runs in
-// the background, and no authentication key or protocol payload is collected.
+// CBCentralManager, Rust sessions and write queues are confined to the main
+// queue. Keys stay in Keychain and are excluded from logs and exports.
 final class BluetoothModel: NSObject, ObservableObject {
     @Published private(set) var bluetoothState = "尚未申请蓝牙权限"
     @Published private(set) var status = "点击“扫描附近设备”开始。"
@@ -55,6 +56,19 @@ final class BluetoothModel: NSObject, ObservableObject {
     @Published private(set) var notificationCount = 0
     @Published private(set) var exportURL: URL?
     @Published private(set) var exportError: String?
+    @Published private(set) var authState = "尚未连接"
+    @Published private(set) var isAuthenticated = false
+    @Published private(set) var isSyncing = false
+    @Published private(set) var hasStoredKey = false
+    @Published private(set) var lastDevice: ScanDevice?
+    @Published private(set) var firmware: String?
+    @Published private(set) var modelName: String?
+    @Published private(set) var keyError: String?
+    @Published private(set) var syncMessage = "还没有同步健康数据"
+    @Published private(set) var healthExportURL: URL?
+    @Published private(set) var retrievedConnectedCount = 0
+    @Published private(set) var scanResultCount = 0
+    let archive = HealthArchive()
 
     private enum Phase: String {
         case idle, connecting, discovering, ready, failed, cancelling
@@ -77,11 +91,34 @@ final class BluetoothModel: NSObject, ObservableObject {
     private var cancellationTimeout: DispatchWorkItem?
     private var batteryTimeout: DispatchWorkItem?
     private var subscriptionTimeout: DispatchWorkItem?
+    private var session: RustSession?
+    private var sessionTimer: DispatchSourceTimer?
+    private var writeTimeout: DispatchWorkItem?
+    private var syncTimeout: DispatchWorkItem?
+    private var writeQueue: [Data] = []
+    private var awaitingWriteResponse = false
+    private var writeType: CBCharacteristicWriteType = .withResponse
+    private var sessionStartedAt: TimeInterval?
+    private var isAppActive = true
+    private var backgroundStartedAt: TimeInterval?
+    private var scannedIdentifiers = Set<UUID>()
+    private var automaticReconnectAttempts = 0
+    private var authenticationTimeoutSeconds: TimeInterval = 45
+    private var syncHadFailures = false
+
+    override init() {
+        super.init()
+        if let data = UserDefaults.standard.data(forKey: "band9.last-device") {
+            lastDevice = try? JSONDecoder().decode(ScanDevice.self, from: data)
+        }
+    }
+
+    var currentDeviceID: UUID? { selectedDevice?.id ?? lastDevice?.id }
 
     var coreVersion: String { RustBridge.version }
 
     var appVersion: String {
-        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.1.0"
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.2.0"
         let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "1"
         return "\(version) (\(build))"
     }
@@ -94,9 +131,21 @@ final class BluetoothModel: NSObject, ObservableObject {
         phase == .ready && discoveryComplete && isConnected && notificationCharacteristic != nil && !isChangingSubscription
     }
 
-    func scan() { request(.scan) }
+    func scan() {
+        automaticReconnectAttempts = 0
+        request(.scan)
+    }
 
-    func connect(_ device: ScanDevice) { request(.connect(device.id)) }
+    func connect(_ device: ScanDevice) {
+        automaticReconnectAttempts = 0
+        request(.connect(device.id))
+    }
+
+    func reconnect() {
+        automaticReconnectAttempts = 0
+        guard let device = selectedDevice ?? lastDevice else { scan(); return }
+        request(.connect(device.id))
+    }
 
     func stopScan() {
         scanTimeout?.cancel()
@@ -106,8 +155,9 @@ final class BluetoothModel: NSObject, ObservableObject {
         if isScanning {
             isScanning = false
             isBusy = false
-            status = "扫描已停止，共发现 \(devices.count) 台设备。"
-            log("扫描停止。")
+            status = devices.isEmpty ? "暂未找到手环。请靠近手机并唤醒手环；已连接系统的设备也会出现在列表中。" : "扫描已停止，共发现 \(devices.count) 台设备。"
+            log("扫描停止：广播发现 \(scanResultCount) 台，系统已连接 \(retrievedConnectedCount) 台，共 \(devices.count) 台候选设备。")
+            prepareExport()
         }
     }
 
@@ -116,13 +166,39 @@ final class BluetoothModel: NSObject, ObservableObject {
     func suspend() {
         // The iOS permission dialog can briefly make the scene inactive. The
         // caller invokes this only for the background scene phase.
-        guard central != nil else { return }
-        request(.none, completionStatus: "应用进入后台，已停止诊断；回到前台后可重新扫描。")
-        log("进入后台，停止扫描并取消连接。")
+        isAppActive = false
+        backgroundStartedAt = ProcessInfo.processInfo.systemUptime
+        stopScan()
+        session?.pauseClock()
+        sessionTimer?.cancel()
+        sessionTimer = nil
+        writeTimeout?.cancel()
+        writeTimeout = nil
+        syncTimeout?.cancel()
+        syncTimeout = nil
+        if isConnected { log("进入后台，保留设备连接并暂停主动发送。") }
+        prepareExport()
+    }
+
+    func resume() {
+        guard !isAppActive else { return }
+        isAppActive = true
+        if let started = backgroundStartedAt, let authStarted = sessionStartedAt {
+            sessionStartedAt = authStarted + ProcessInfo.processInfo.systemUptime - started
+        }
+        backgroundStartedAt = nil
+        session?.resumeClock()
+        if session != nil {
+            startSessionTimer()
+            if awaitingWriteResponse { armWriteTimeout() }
+            if isSyncing { armSyncTimeout() }
+            drainWriteQueue()
+        }
     }
 
     private func request(_ action: NextAction, completionStatus: String? = nil) {
         generation = UUID()
+        destroySession()
         cancelWorkTimers()
         central?.stopScan()
         isScanning = false
@@ -199,6 +275,10 @@ final class BluetoothModel: NSObject, ObservableObject {
             devices.removeAll()
             peripherals.removeAll()
             selectedDevice = nil
+            scannedIdentifiers.removeAll()
+            scanResultCount = 0
+            retrievedConnectedCount = 0
+            mergeSystemConnectedDevices(central)
             isScanning = true
             isBusy = false
             status = "正在扫描附近的蓝牙设备（最多 15 秒）…"
@@ -207,11 +287,18 @@ final class BluetoothModel: NSObject, ObservableObject {
             log("开始前台扫描，不按设备名称过滤。")
             scanTimeout = schedule(after: 15) { [weak self] in self?.stopScan() }
         case .connect(let id):
-            guard let peripheral = peripherals[id], let device = devices.first(where: { $0.id == id }) else {
+            let recovered = central.retrievePeripherals(withIdentifiers: [id]).first
+            guard let peripheral = peripherals[id] ?? recovered,
+                  let device = devices.first(where: { $0.id == id }) ?? lastDevice.flatMap({ $0.id == id ? $0 : nil }) else {
                 status = "设备记录已失效，请重新扫描。"
                 return
             }
             selectedDevice = device
+            lastDevice = device
+            if let stored = try? JSONEncoder().encode(device) { UserDefaults.standard.set(stored, forKey: "band9.last-device") }
+            hasStoredKey = (try? DeviceKeyStore.load(for: device.id)) != nil
+            authState = "等待蓝牙连接"
+            keyError = nil
             activePeripheral = peripheral
             peripheral.delegate = self
             phase = .connecting
@@ -232,6 +319,8 @@ final class BluetoothModel: NSObject, ObservableObject {
         diagnosis = nil
         discoveryComplete = false
         batteryLevel = nil
+        firmware = nil
+        modelName = nil
         notificationCount = 0
         isSubscribed = false
         pendingServices.removeAll()
@@ -260,8 +349,23 @@ final class BluetoothModel: NSObject, ObservableObject {
     }
 
     private func log(_ message: String) {
-        logs.append(DiagnosticLog(time: Date(), message: message))
+        let redacted = message.replacingOccurrences(of: "(?i)\\b[0-9a-f]{32,}\\b", with: "〈数据已隐藏〉", options: .regularExpression)
+        logs.append(DiagnosticLog(time: Date(), message: redacted))
         if logs.count > 200 { logs.removeFirst(logs.count - 200) }
+    }
+
+    private func mergeSystemConnectedDevices(_ central: CBCentralManager) {
+        let knownServices = ["FE95", "FEE0", "180D"].map(CBUUID.init(string:))
+        let connected = central.retrieveConnectedPeripherals(withServices: knownServices)
+        retrievedConnectedCount = connected.count
+        for peripheral in connected {
+            peripherals[peripheral.identifier] = peripheral
+            if !devices.contains(where: { $0.id == peripheral.identifier }) {
+                devices.append(ScanDevice(id: peripheral.identifier, name: peripheral.name ?? "系统已连接的蓝牙设备",
+                                          rssi: nil, advertisedServices: [], lastSeen: Date(), systemConnected: true))
+            }
+        }
+        log("从系统获取到 \(connected.count) 台已连接的候选设备。")
     }
 
     private func refreshServices(_ peripheral: CBPeripheral) {
@@ -296,16 +400,18 @@ final class BluetoothModel: NSObject, ObservableObject {
         phase = .ready
         isBusy = false
         discoveryComplete = true
-        status = "服务发现完成。尚未进行手环认证或健康数据同步。"
+        status = "服务发现完成，正在检查设备认证条件。"
         log("服务发现完成：\(services.count) 个服务，\(services.reduce(0) { $0 + $1.characteristics.count }) 个特征。")
         do {
             diagnosis = try RustBridge.diagnose(services: services)
             log("Rust 核心完成服务特征诊断。")
+            beginAuthenticationIfPossible()
         } catch {
             diagnosis = nil
             status = "服务已完整发现，但 Rust 诊断失败：\(error.localizedDescription)"
             log("Rust 诊断失败：\(error.localizedDescription)")
         }
+        prepareExport()
     }
 
     private func failDiscovery(_ message: String, peripheral: CBPeripheral) {
@@ -315,6 +421,7 @@ final class BluetoothModel: NSObject, ObservableObject {
         isBusy = false
         discoveryComplete = false
         diagnosis = nil
+        destroySession()
         pendingServices.removeAll()
         refreshServices(peripheral)
         status = "服务发现未完成：\(message)"
@@ -334,7 +441,7 @@ final class BluetoothModel: NSObject, ObservableObject {
         guard notifyCandidate == CBUUID(string: "005E"),
               writeCandidate == CBUUID(string: "005F") else { return nil }
         // Both characteristics must belong to the same FE95 service instance.
-        // The write capability identifies the pair; this app never writes to it.
+        // The write capability identifies the pair before authentication starts.
         for service in activePeripheral?.services ?? [] where service.uuid == CBUUID(string: "FE95") {
             let characteristics = service.characteristics ?? []
             guard characteristics.contains(where: {
@@ -366,8 +473,9 @@ final class BluetoothModel: NSObject, ObservableObject {
         guard canSubscribe, let peripheral = activePeripheral, let characteristic = notificationCharacteristic else { return }
         isChangingSubscription = true
         let enable = !characteristic.isNotifying
+        if !enable { destroySession() }
         peripheral.setNotifyValue(enable, for: characteristic)
-        log(enable ? "用户请求订阅 005E 通知；未写入认证命令。" : "用户请求停止订阅 005E 通知。")
+        log(enable ? "用户请求订阅 005E 通知。" : "用户请求停止订阅 005E 通知。")
         subscriptionTimeout = schedule(after: 8) { [weak self] in
             guard let self = self else { return }
             self.isChangingSubscription = false
@@ -387,6 +495,8 @@ final class BluetoothModel: NSObject, ObservableObject {
             let status: String
             let phase: String
             let isConnected: Bool
+            let isAuthenticated: Bool
+            let authenticationState: String
             let serviceDiscoveryComplete: Bool
             let device: ScanDevice?
             let services: [ServiceSnapshot]
@@ -395,22 +505,28 @@ final class BluetoothModel: NSObject, ObservableObject {
             let notificationCount: Int
             let logs: [DiagnosticLog]
             let limitations: [String]
+            let scanResults: [ScanDevice]
+            let retrieveConnectedCount: Int
+            let scanCount: Int
         }
         let report = Report(schemaVersion: 1, exportedAt: Date(), appVersion: appVersion,
                             coreVersion: coreVersion, systemVersion: UIDevice.current.systemVersion,
                             bluetoothState: bluetoothState, status: status, phase: phase.rawValue,
-                            isConnected: isConnected, serviceDiscoveryComplete: discoveryComplete,
+                            isConnected: isConnected, isAuthenticated: isAuthenticated, authenticationState: authState,
+                            serviceDiscoveryComplete: discoveryComplete,
                             device: selectedDevice, services: services, diagnosis: diagnosis,
                             batteryPercent: batteryLevel, notificationCount: notificationCount, logs: logs,
-                            limitations: ["服务匹配不能证明设备型号或认证成功。", "未进行小米协议认证、数据同步或 HealthKit 写入。", "不包含通知原始内容；包含设备名称和本机蓝牙设备标识。"])
+                            limitations: ["服务匹配本身不能证明设备型号或认证成功。", "健康记录保存在本机；当前未写入 HealthKit。", "不包含密钥、会话随机数或通知原始内容；包含设备名称和本机蓝牙设备标识。"],
+                            scanResults: devices, retrieveConnectedCount: retrievedConnectedCount, scanCount: scanResultCount)
         do {
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
             encoder.dateEncodingStrategy = .iso8601
-            let directory = FileManager.default.temporaryDirectory.appendingPathComponent("Band9Diagnostics", isDirectory: true)
+            let directory = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+                .appendingPathComponent("Band9Diagnostics", isDirectory: true)
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             let url = directory.appendingPathComponent("band9-diagnostics.json")
-            try encoder.encode(report).write(to: url, options: .atomic)
+            try encoder.encode(report).write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
             exportURL = url
             exportError = nil
         } catch {
@@ -440,6 +556,7 @@ extension BluetoothModel: CBCentralManagerDelegate {
                 startPendingAction()
             }
         } else {
+            destroySession()
             cancelWorkTimers()
             central.stopScan()
             activePeripheral?.delegate = nil
@@ -467,12 +584,17 @@ extension BluetoothModel: CBCentralManagerDelegate {
                                 rssi: RSSI.intValue == 127 ? nil : RSSI.intValue,
                                 advertisedServices: advertised, lastSeen: Date())
         peripherals[peripheral.identifier] = peripheral
+        scannedIdentifiers.insert(peripheral.identifier)
+        scanResultCount = scannedIdentifiers.count
         if let index = devices.firstIndex(where: { $0.id == device.id }) {
-            devices[index] = device
+            var updated = device
+            updated.systemConnected = devices[index].systemConnected
+            devices[index] = updated
         } else {
             devices.append(device)
         }
         devices.sort {
+            if ($0.systemConnected == true) != ($1.systemConnected == true) { return $0.systemConnected == true }
             if $0.rssi != $1.rssi { return ($0.rssi ?? Int.min) > ($1.rssi ?? Int.min) }
             return $0.id.uuidString < $1.id.uuidString
         }
@@ -507,6 +629,8 @@ extension BluetoothModel: CBCentralManagerDelegate {
     private func endConnection(_ central: CBCentralManager, peripheral: CBPeripheral, error: Error?, failed: Bool) {
         guard central === self.central, peripheral === activePeripheral else { return }
         let wasCancelling = phase == .cancelling
+        let previousFailure = phase == .failed ? finalStopStatus : nil
+        destroySession()
         cancelWorkTimers()
         peripheral.delegate = nil
         activePeripheral = nil
@@ -520,6 +644,11 @@ extension BluetoothModel: CBCentralManagerDelegate {
         if let error = error { status += "：\(error.localizedDescription)" }
         log(status)
         if wasCancelling { startPendingAction() }
+        else if let previousFailure = previousFailure {
+            status = previousFailure
+            authState = "认证或通信失败"
+        }
+        prepareExport()
     }
 }
 
@@ -562,8 +691,9 @@ extension BluetoothModel: CBPeripheralDelegate {
             status = "通知订阅失败：\(error.localizedDescription)"
             log(status)
         } else {
-            status = isSubscribed ? "正在接收 005E 通知，仅记录长度；尚未认证。" : "已停止订阅 005E 通知。"
+            status = isSubscribed ? "设备通知已开启。" : "已停止订阅 005E 通知。"
             log(status)
+            if isSubscribed { startAuthenticatedSession() }
         }
     }
 
@@ -587,6 +717,7 @@ extension BluetoothModel: CBPeripheralDelegate {
             else {
                 notificationCount += 1
                 log("005E 通知 #\(notificationCount)：\(characteristic.value?.count ?? 0) 字节（未记录内容）。")
+                if let value = characteristic.value, session != nil { runSessionCommand("receive", hex: value.hex) }
             }
         }
     }
@@ -594,5 +725,312 @@ extension BluetoothModel: CBPeripheralDelegate {
     func peripheral(_ peripheral: CBPeripheral, didModifyServices invalidatedServices: [CBService]) {
         guard peripheral === activePeripheral, phase == .ready || phase == .discovering else { return }
         failDiscovery("设备服务发生变化，请断开并重新连接。", peripheral: peripheral)
+    }
+
+    func peripheralIsReady(toSendWriteWithoutResponse peripheral: CBPeripheral) {
+        guard peripheral === activePeripheral, phase == .ready else { return }
+        drainWriteQueue()
+    }
+
+    func peripheral(_ peripheral: CBPeripheral, didWriteValueFor characteristic: CBCharacteristic, error: Error?) {
+        guard peripheral === activePeripheral, characteristic === sessionWriteCharacteristic,
+              session != nil, awaitingWriteResponse else { return }
+        writeTimeout?.cancel()
+        writeTimeout = nil
+        awaitingWriteResponse = false
+        if let error = error { sessionFailure("蓝牙发送失败：\(error.localizedDescription)") }
+        else { drainWriteQueue() }
+    }
+}
+
+extension BluetoothModel {
+    private var sessionWriteCharacteristic: CBCharacteristic? {
+        guard let notification = notificationCharacteristic, let service = notification.service,
+              let uuid = diagnosis?.suggestedWriteUUID else { return nil }
+        return service.characteristics?.first {
+            $0.uuid == CBUUID(string: uuid) && ($0.properties.contains(.write) || $0.properties.contains(.writeWithoutResponse))
+        }
+    }
+
+    func saveDeviceKey(_ text: String) -> Bool {
+        guard let device = selectedDevice ?? lastDevice else {
+            keyError = "请先扫描并选择需要连接的手环。"
+            return false
+        }
+        do {
+            try DeviceKeyStore.save(text, for: device.id)
+            hasStoredKey = true
+            keyError = nil
+            log("设备密钥已保存在本机钥匙串。")
+            if session != nil { reconnect() }
+            else { beginAuthenticationIfPossible() }
+            return true
+        } catch { keyError = error.localizedDescription; return false }
+    }
+
+    func removeDeviceKey() {
+        guard let id = currentDeviceID else { return }
+        do {
+            try DeviceKeyStore.remove(for: id)
+            disconnect()
+            hasStoredKey = false
+            keyError = nil
+            authState = "设备密钥已从本机删除"
+        } catch { keyError = error.localizedDescription }
+    }
+
+    private func beginAuthenticationIfPossible() {
+        guard phase == .ready, isConnected, session == nil, let id = selectedDevice?.id else { return }
+        guard notificationCharacteristic != nil, sessionWriteCharacteristic != nil else {
+            authState = "此设备未发现受支持的小米 V2 通道"
+            status = "可在连接诊断中查看服务清单。"
+            return
+        }
+        do {
+            guard try DeviceKeyStore.load(for: id) != nil else {
+                hasStoredKey = false
+                authState = "需要设备密钥"
+                status = "已连接手环，请添加此设备的 AuthKey 后认证。"
+                return
+            }
+            hasStoredKey = true
+            isSubscribed = notificationCharacteristic?.isNotifying == true
+            if isSubscribed { startAuthenticatedSession() }
+            else {
+                authState = "正在开启设备通知"
+                if !isChangingSubscription { toggleSubscription() }
+            }
+        } catch { keyError = error.localizedDescription; authState = "无法读取设备密钥" }
+    }
+
+    private func startAuthenticatedSession() {
+        guard session == nil, phase == .ready, isConnected, isSubscribed,
+              let peripheral = activePeripheral, let characteristic = sessionWriteCharacteristic,
+              let id = selectedDevice?.id else { return }
+        do {
+            guard let key = try DeviceKeyStore.load(for: id) else { authState = "需要设备密钥"; return }
+            writeType = characteristic.properties.contains(.writeWithoutResponse) ? .withoutResponse : .withResponse
+            let mtu = peripheral.maximumWriteValueLength(for: writeType)
+            guard mtu >= 20 else { sessionFailure("设备蓝牙写入容量不足，无法开始认证。"); return }
+            session = try RustSession(key: key, mtu: mtu)
+            sessionStartedAt = ProcessInfo.processInfo.systemUptime
+            authenticationTimeoutSeconds = 45
+            authState = "正在安全认证"
+            log("创建新的 Rust 认证会话，随机数由系统安全生成。")
+            startSessionTimer()
+            runSessionCommand("start")
+        } catch { sessionFailure(error.localizedDescription) }
+    }
+
+    private func destroySession() {
+        sessionTimer?.cancel()
+        sessionTimer = nil
+        writeTimeout?.cancel()
+        writeTimeout = nil
+        syncTimeout?.cancel()
+        syncTimeout = nil
+        session?.close()
+        session = nil
+        sessionStartedAt = nil
+        writeQueue.removeAll()
+        awaitingWriteResponse = false
+        isAuthenticated = false
+        if isSyncing { syncMessage = "同步已中断，已收到的数据保留在本机。" }
+        isSyncing = false
+        authState = "尚未认证"
+    }
+
+    private func startSessionTimer() {
+        guard isAppActive, session != nil, sessionTimer == nil else { return }
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(deadline: .now() + 0.25, repeating: 0.25)
+        timer.setEventHandler { [weak self] in
+            guard let self = self, self.session != nil else { return }
+            if !self.isAuthenticated, let started = self.sessionStartedAt,
+               ProcessInfo.processInfo.systemUptime - started > self.authenticationTimeoutSeconds {
+                self.sessionFailure("认证超时，请确认设备密钥属于这只手环后重新连接。")
+                return
+            }
+            self.runSessionCommand("tick")
+        }
+        sessionTimer = timer
+        timer.resume()
+    }
+
+    private func armWriteTimeout() {
+        writeTimeout?.cancel()
+        writeTimeout = schedule(after: 8) { [weak self] in
+            self?.sessionFailure("蓝牙发送确认超时，请重新连接。")
+        }
+    }
+
+    private func armSyncTimeout() {
+        syncTimeout?.cancel()
+        syncTimeout = schedule(after: 180) { [weak self] in
+            guard let self = self, self.isSyncing else { return }
+            self.isSyncing = false
+            self.syncMessage = "本次同步超过 3 分钟；已收到的数据保留在本机，可重新连接后再试。"
+            self.log(self.syncMessage)
+        }
+    }
+
+    private func sessionFailure(_ message: String) {
+        destroySession()
+        authState = "认证或通信失败"
+        status = message
+        finalStopStatus = message
+        log(message)
+        // Stop notifications and the physical connection so delayed responses
+        // from a failed session can never enter a replacement Rust session.
+        if let peripheral = activePeripheral {
+            phase = .failed
+            central?.cancelPeripheralConnection(peripheral)
+        }
+        prepareExport()
+    }
+
+    private func runSessionCommand(_ operation: String, hex: String? = nil) {
+        guard let session = session else { return }
+        do {
+            let response = try session.command(operation, hex: hex)
+            if let reconnect = response.events.first(where: { $0.kind == "reconnect_required" }) {
+                handleSessionEvent(reconnect)
+                return
+            }
+            if response.state == "failed" {
+                sessionFailure(response.error ?? "手环认证或协议处理失败，请重新连接。")
+                return
+            }
+            if let error = response.error {
+                log("协议提示，继续处理本次响应：\(error)")
+            }
+            // Preserve Rust's order, including all fragments of a frame.
+            for item in response.outbound {
+                guard let data = Data(hex: item.hex), !data.isEmpty else { throw RustSession.Failure.malformedHex }
+                writeQueue.append(data)
+            }
+            guard writeQueue.count <= 4096 else { sessionFailure("发送队列超出上限，请重新连接。"); return }
+            drainWriteQueue()
+            guard self.session === session else { return }
+            for event in response.events {
+                guard self.session === session else { return }
+                handleSessionEvent(event)
+            }
+        } catch { sessionFailure(error.localizedDescription) }
+    }
+
+    private func drainWriteQueue() {
+        guard isAppActive, session != nil, phase == .ready, !awaitingWriteResponse,
+              let peripheral = activePeripheral, let characteristic = sessionWriteCharacteristic else { return }
+        while !writeQueue.isEmpty {
+            if writeType == .withoutResponse && !peripheral.canSendWriteWithoutResponse {
+                if writeTimeout == nil { armWriteTimeout() }
+                return
+            }
+            writeTimeout?.cancel()
+            writeTimeout = nil
+            let data = writeQueue.removeFirst()
+            guard data.count <= peripheral.maximumWriteValueLength(for: writeType) else {
+                sessionFailure("协议数据超过当前蓝牙写入容量，请重新连接。")
+                return
+            }
+            if writeType == .withResponse { awaitingWriteResponse = true }
+            peripheral.writeValue(data, for: characteristic, type: writeType)
+            if writeType == .withResponse {
+                armWriteTimeout()
+                return
+            }
+        }
+    }
+
+    private func handleSessionEvent(_ event: SessionReply.Event) {
+        switch event.kind {
+        case "pairing_required":
+            authenticationTimeoutSeconds = 120
+            sessionStartedAt = ProcessInfo.processInfo.systemUptime
+            authState = "等待确认配对"
+            status = "请在手环或系统弹窗中确认配对。"
+            log(status)
+            prepareExport()
+        case "reconnect_required":
+            guard automaticReconnectAttempts < 2, let id = selectedDevice?.id else {
+                sessionFailure("手环重复要求重新建立会话，请稍后手动重连。")
+                return
+            }
+            automaticReconnectAttempts += 1
+            log("手环要求重新建立认证会话，正在进行第 \(automaticReconnectAttempts) 次重连。")
+            request(.connect(id))
+        case "authenticated":
+            isAuthenticated = true
+            authState = "认证成功"
+            status = "手环已连接，可以同步健康数据。"
+            log("手环协议认证成功。")
+            runSessionCommand("battery")
+            runSessionCommand("device_info")
+            prepareExport()
+        case "battery":
+            if let percent = event.data["percent"]?.number, percent >= 0, percent <= 100 {
+                batteryLevel = Int(percent)
+                log("已更新手环电量。")
+            }
+        case "device_info":
+            firmware = event.data["firmware"]?.string
+            modelName = event.data["model"]?.string
+        case "health_file":
+            guard let device = selectedDevice?.id else { return }
+            do {
+                let file = try JSONDecoder().decode(HealthFile.self, from: JSONEncoder().encode(event.data))
+                try archive.ingest(file, device: device)
+                let count = archive.files.filter { $0.deviceID == device }.count
+                syncMessage = "已保存 \(count) 个健康文件。"
+                log(file.parsed.status == "supported" ? "健康文件已保存并解析为 \(file.parsed.records.count) 条记录。" : "健康文件已保存；此格式暂未解析。")
+            } catch {
+                syncHadFailures = true
+                syncMessage = "保存健康文件失败：\(error.localizedDescription)"
+                log(syncMessage)
+            }
+        case "sync_started":
+            isSyncing = true
+            syncMessage = "正在获取手环健康记录…"
+        case "health_file_list":
+            syncMessage = "已收到健康文件目录，正在读取数据…"
+        case "sync_complete":
+            isSyncing = false
+            syncTimeout?.cancel()
+            syncTimeout = nil
+            let failed = syncHadFailures || (event.data["failures"]?.number ?? 0) > 0
+            syncMessage = failed ? "同步结束，部分文件未完成；已收到的数据保留在本机，可稍后重试。" : "同步完成，已收到的记录已保存在本机。"
+            log(syncMessage)
+            prepareExport()
+        case "sync_failed":
+            syncHadFailures = true
+            isSyncing = false
+            syncTimeout?.cancel()
+            syncTimeout = nil
+            syncMessage = "部分数据未完成同步，可稍后重试。"
+            log(event.message)
+        case "protocol_error": log("协议处理提示：\(event.message)")
+        default: break
+        }
+    }
+
+    func syncHealth() {
+        guard isAuthenticated, !isSyncing else { return }
+        isSyncing = true
+        syncHadFailures = false
+        syncMessage = "正在获取手环健康记录…"
+        armSyncTimeout()
+        runSessionCommand("sync")
+    }
+
+    func refreshBattery() {
+        guard isAuthenticated else { return }
+        runSessionCommand("battery")
+    }
+
+    func exportHealth() {
+        guard let id = currentDeviceID else { return }
+        do { healthExportURL = try archive.export(device: id); exportError = nil }
+        catch { healthExportURL = nil; exportError = error.localizedDescription }
     }
 }

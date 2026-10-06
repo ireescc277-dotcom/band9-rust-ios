@@ -1,12 +1,29 @@
-//! Small owned-string C ABI for the P0 iOS diagnostic application.
+//! Owned-string C ABI for inventory diagnosis and authenticated band sessions.
 //! Bluetooth object ownership and callbacks stay on the Swift main queue.
 mod diagnostics;
+mod session;
 
 use diagnostics::{diagnose, Diagnosis, Inventory};
 use std::ffi::{c_char, CString};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
 const MAX_REQUEST_BYTES: usize = 128 * 1024;
+
+/// # Safety
+/// `input` is null or a readable NUL-terminated C string; returned bytes borrow it.
+unsafe fn bounded_c_string<'a>(input: *const c_char, maximum: usize) -> Option<&'a [u8]> {
+    if input.is_null() {
+        return None;
+    }
+    for length in 0..=maximum {
+        // SAFETY: caller guarantees the input allocation through its first NUL.
+        if unsafe { *input.add(length) } == 0 {
+            // SAFETY: inspected bytes are within that same live allocation.
+            return Some(unsafe { std::slice::from_raw_parts(input.cast(), length) });
+        }
+    }
+    None
+}
 
 #[no_mangle]
 pub extern "C" fn band9_core_version() -> *const c_char {
@@ -89,7 +106,7 @@ mod tests {
                 assert!(!pointer.is_null());
                 let d: Diagnosis =
                     serde_json::from_slice(CStr::from_ptr(pointer).to_bytes()).unwrap();
-                assert_eq!(d.core_version, "0.1.0");
+                assert_eq!(d.core_version, env!("CARGO_PKG_VERSION"));
                 assert_eq!(d.profile, "unknown");
                 band9_string_free(pointer);
             }

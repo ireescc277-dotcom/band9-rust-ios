@@ -11,3 +11,8 @@ xcuserdata/
 .env
 diagnostic-*.json
 band9-diagnostics*.json
+*auth-key*.json
+*auth-key*.txt
+*.pfx
+*.key
+__pycache__/

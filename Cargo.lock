@@ -26,7 +26,7 @@ dependencies = [
 
 [[package]]
 name = "band9-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aes",
  "ccm",
@@ -34,6 +34,7 @@ dependencies = [
  "hex",
  "hkdf",
  "hmac",
+ "serde",
  "serde_json",
  "sha2",
  "zeroize",
@@ -41,7 +42,7 @@ dependencies = [
 
 [[package]]
 name = "band9-ffi"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "band9-core",
  "serde",

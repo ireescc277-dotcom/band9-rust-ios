@@ -17,7 +17,7 @@ settings:
     CODE_SIGNING_REQUIRED: "NO"
     CODE_SIGN_IDENTITY: ""
     ENABLE_BITCODE: "NO"
-    MARKETING_VERSION: "0.1.0"
+    MARKETING_VERSION: "0.2.0"
     CURRENT_PROJECT_VERSION: "1"
 targets:
   Band9Diagnostics:
@@ -53,6 +53,7 @@ targets:
       - sdk: CoreFoundation.framework
       - sdk: UIKit.framework
       - sdk: SwiftUI.framework
+      - sdk: Charts.framework
       - sdk: Security.framework
       - sdk: SystemConfiguration.framework
       - sdk: libiconv.tbd

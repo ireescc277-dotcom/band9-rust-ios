@@ -1,6 +1,6 @@
 # 后续协议接入
 
-本文记录下一阶段的实现边界与顺序。**用户的 Band 9 尚未完成实机通道、认证或健康同步验证。** 当前 App 是蓝牙诊断工具；算法测试、iOS 构建成功和读到标准电量，都不能代替设备认证验证。
+本文记录下一阶段的实现边界与顺序。**用户的 Band 9 尚未完成实机通道、认证或健康同步验证。** 当前 App 已接入 V2 会话认证、文件同步及本地健康页面；算法测试、iOS 构建成功和读到标准电量，都不能代替设备认证验证。
 
 ## 先确认实际通道
 
@@ -21,13 +21,13 @@ V2 方向以 my-band 的实际常量及回调为准：**RX=005E，TX=005F**；�
 | 模块/API | 当前作用 |
 | --- | --- |
 | `frame::build_frame`、`parse_frame`、`StreamDecoder::push/reset` | 有界封包、CRC16、分片/黏包与损坏数据后的重新同步 |
-| `frame::build_ack`、`SessionConfig::build` | 构造传输 ACK、会话启动配置；尚无协商、发送窗口或重试状态机 |
+| `frame::build_ack`、`SessionConfig::build` | 构造传输 ACK、会话启动配置；session 模块实现单命令串行、有限重试和协商 |
 | `crypto::SessionKeys::derive_verified`、`phone_hmac` | HKDF 派生方向密钥、验证手环证明、生成手机证明 |
 | `encrypt_auth_info`、`ccm_encrypt/decrypt`、`encrypt_v2/decrypt_v2` | 认证 CCM 与 V2 CTR 字节计算；不负责随机数、连接或认证流程 |
 | `battery_command()` | 返回只读电量请求的 Protobuf 字节，不发送请求 |
-| C ABI 三个入口 | `band9_core_version`、`band9_diagnose_json`、`band9_string_free`；目前只向 Swift 暴露版本与清单诊断 |
+| C ABI 三个入口 | `band9_core_version`、`band9_diagnose_json`、`band9_string_free`；原有版本与清单诊断；另有 session_create/command/free 三个会话入口 |
 
-`SessionKeys` 的 Debug 输出已隐藏密钥，持有的秘密数组在释放时清零。调用方仍须保护输入副本。当前没有密钥导入、Protobuf 通用编解码、认证会话句柄或健康文件解析器。
+`SessionKeys` 的 Debug 输出已隐藏密钥，持有的秘密数组在释放时清零。调用方仍须保护输入副本。当前已接入 Keychain 密钥导入、所需 Protobuf 字段、认证会话句柄和健康解析。未知布局与未实现的功能以 README 的覆盖表为准。
 
 ## V2 帧与认证
 
@@ -71,7 +71,7 @@ MHWCahe/<用户目录>/VirtualDevice_registerList/manifest.sqlite
 
 必须区分两种 ACK：V2 type 1 是维持传输的帧确认；健康命令 `type=8/subtype=5` 是文件消费确认，可能使设备将历史标记为已同步。原型继续发送必要的传输 ACK，但默认保留设备历史；完成原始文件持久化、CRC 验证及解析后，再决定是否启用消费确认。
 
-建议按以下验收顺序接入：
+以下是实机验收顺序；会话与文件处理代码已接入，设备验收仍需逐项完成：
 
 1. 用现有 App 收集用户 Band 9 的完整 GATT 清单，另行记录手环固件、地区及 NFC 版本，确认通道及属性。当前报告不会自动读取手环固件版本。
 2. 扩展 C ABI，增加持有 `StreamDecoder`、序号和 `SessionKeys` 的会话句柄；Swift 管理 BLE 对象、随机数及 Keychain，Rust 输出待发送字节和状态事件。断线时销毁会话，超时清理残留分片。
