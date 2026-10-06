@@ -1,0 +1,13 @@
+/target/
+/build/
+/ios/Vendor/
+/ios/*.xcodeproj/
+*.xcuserstate
+xcuserdata/
+.DS_Store
+*.ipa
+*.p12
+*.mobileprovision
+.env
+diagnostic-*.json
+band9-diagnostics*.json

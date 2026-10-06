@@ -1,0 +1,83 @@
+name: Rust checks and unsigned iOS build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  RUST_TOOLCHAIN: 1.98.1
+
+jobs:
+  rust-checks:
+    name: Format, check, lint and test Rust
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component rustfmt --component clippy
+      - name: Verify the locked workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build/logs
+          cargo +"$RUST_TOOLCHAIN" fmt --all -- --check 2>&1 | tee build/logs/rust-checks.log
+          cargo +"$RUST_TOOLCHAIN" check --workspace --all-targets --locked 2>&1 | tee -a build/logs/rust-checks.log
+          cargo +"$RUST_TOOLCHAIN" clippy --workspace --all-targets --locked -- -D warnings 2>&1 | tee -a build/logs/rust-checks.log
+          cargo +"$RUST_TOOLCHAIN" test --workspace --all-targets --locked 2>&1 | tee -a build/logs/rust-checks.log
+      - name: Keep Rust verification logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: rust-checks-${{ github.run_number }}
+          path: build/logs/
+          if-no-files-found: warn
+          retention-days: 14
+
+  ios-unsigned:
+    name: Build an unsigned arm64 iPhone IPA
+    needs: rust-checks
+    runs-on: macos-15
+    timeout-minutes: 45
+    env:
+      # Present in the official macos-15 image; fail clearly if removed later.
+      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Build and verify unsigned device IPA
+        shell: bash
+        run: bash scripts/build-ios.sh
+      - name: Upload unsigned IPA and its verification record
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: Band9Diagnostics-unsigned-${{ github.run_number }}
+          path: |
+            build/ios/Band9Diagnostics-unsigned.ipa
+            build/ios/Band9Diagnostics-unsigned.ipa.sha256
+            build/ios/artifact.json
+          if-no-files-found: error
+          retention-days: 14
+      - name: Keep iOS build and validation logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ios-build-logs-${{ github.run_number }}
+          path: build/ios/logs/
+          if-no-files-found: warn
+          retention-days: 14

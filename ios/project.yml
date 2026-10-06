@@ -1,0 +1,68 @@
+name: Band9Diagnostics
+options:
+  minimumXcodeGenVersion: 2.46.0
+  xcodeVersion: "16.4"
+  projectFormat: xcode16_3
+  createIntermediateGroups: true
+  deploymentTarget:
+    iOS: "17.0"
+configs:
+  Debug: debug
+  Release: release
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    IPHONEOS_DEPLOYMENT_TARGET: "17.0"
+    CODE_SIGNING_ALLOWED: "NO"
+    CODE_SIGNING_REQUIRED: "NO"
+    CODE_SIGN_IDENTITY: ""
+    ENABLE_BITCODE: "NO"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+targets:
+  Band9Diagnostics:
+    type: application
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: Band9Diagnostics
+        excludes:
+          - Info.plist
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: org.band9lab.diagnostics
+        PRODUCT_NAME: Band9Diagnostics
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SUPPORTS_MACCATALYST: "NO"
+        SUPPORTED_PLATFORMS: iphoneos
+        SDKROOT: iphoneos
+        ARCHS: arm64
+        ONLY_ACTIVE_ARCH: "NO"
+        GENERATE_INFOPLIST_FILE: "NO"
+        INFOPLIST_FILE: Band9Diagnostics/Info.plist
+        SWIFT_OBJC_BRIDGING_HEADER: Band9Diagnostics/Bridge/Band9Diagnostics-Bridging-Header.h
+        LIBRARY_SEARCH_PATHS:
+          - $(inherited)
+          - $(SRCROOT)/Vendor
+        OTHER_LDFLAGS:
+          - $(inherited)
+          - -lband9_ffi
+    dependencies:
+      - sdk: CoreBluetooth.framework
+      - sdk: Foundation.framework
+      - sdk: CoreFoundation.framework
+      - sdk: UIKit.framework
+      - sdk: SwiftUI.framework
+      - sdk: Security.framework
+      - sdk: SystemConfiguration.framework
+      - sdk: libiconv.tbd
+      - sdk: libresolv.tbd
+schemes:
+  Band9Diagnostics:
+    build:
+      targets:
+        Band9Diagnostics: all
+    run:
+      config: Debug
+    archive:
+      config: Release

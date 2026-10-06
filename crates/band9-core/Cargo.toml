@@ -1,0 +1,18 @@
+[package]
+name = "band9-core"
+version = "0.1.0"
+edition = "2021"
+description = "Bounded Xiaomi SPP V2 framing and protocol cryptography"
+
+[dependencies]
+aes = { version = "0.8", features = ["zeroize"] }
+ctr = "0.9"
+ccm = "0.5"
+hkdf = "0.12"
+hmac = "0.12"
+sha2 = "0.10"
+zeroize = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+hex = "0.4"
+serde_json = "1"

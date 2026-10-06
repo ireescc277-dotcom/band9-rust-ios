@@ -1,0 +1,49 @@
+{
+  "scope": "Synthetic public test inputs; no real credentials, Swift execution, BLE connection or Band 9 compatibility verification.",
+  "source_commit": "56a8109bff3760bf05ba06c19e26ce2c51f6eea8",
+  "source": "https://github.com/matheusdanoite/my-band/tree/56a8109bff3760bf05ba06c19e26ce2c51f6eea8",
+  "checks": {
+    "hkdf_matches_cryptography": true,
+    "ccm_matches_cryptography": true,
+    "ctr_matches_cryptography": true,
+    "crc_matches_reflected_arc": true,
+    "payload_lengths": [
+      0,
+      1,
+      15,
+      16,
+      17,
+      31,
+      32,
+      255,
+      256,
+      257,
+      4097
+    ],
+    "crc_arc_123456789": "bb3d"
+  },
+  "auth": {
+    "phone_nonce": "000102030405060708090a0b0c0d0e0f",
+    "watch_nonce": "101112131415161718191a1b1c1d1e1f",
+    "synthetic_auth_key": "a0a1a2a3a4a5a6a7a8a9aaabacadaeaf",
+    "prk": "b1489727b2602a0e047cb237580a4c795aaf9023c5bc6b0b865c7fa17e0a2367",
+    "hkdf_expand_64": "e3393c673080c966cbeefdebef174397a8c635055afd6d8a4b0911ede6290f24bf42dc3c737c7e5a4533d8b0377e3838d239252843141900f1abc27730ca3f2a",
+    "decryption_key": "e3393c673080c966cbeefdebef174397",
+    "encryption_key": "a8c635055afd6d8a4b0911ede6290f24",
+    "decryption_nonce_prefix": "bf42dc3c",
+    "encryption_nonce_prefix": "737c7e5a",
+    "expected_watch_hmac": "4ddb0dfe7fd4670d1f8f27d1a210acdf651fb31f6ec093bbb3826274aa497246",
+    "phone_hmac_encryptedNonces_field": "890937d80db6944596a7c105b76837c698187e31f361be7f7fdc6b043590e45e",
+    "auth_ccm_nonce": "737c7e5a0000000000000000",
+    "ccm_test_plaintext_not_device_info": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+    "ccm_test_ciphertext_and_4byte_tag": "c0550fbba32f86ca10116170050a6d7c25f31a0591753efb3763845c34f893201a0b06acbc"
+  },
+  "spp_v2": {
+    "session_config": "a5a5020016001d4d0101030001000002020000fc03020020000402001027",
+    "ack_seq_42": "a5a5012a00000000",
+    "battery_command_proto": "08021001",
+    "battery_command_ctr": "bbdeec26",
+    "battery_command_frame_seq_1": "a5a503010600f1d50102bbdeec26"
+  },
+  "warning": "Fixed keys/nonces are only for tests. The V2 key-as-IV rule is device compatibility behavior, not a recommended design for new cryptographic protocols."
+}
