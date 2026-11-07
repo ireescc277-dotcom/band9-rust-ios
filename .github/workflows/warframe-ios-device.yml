@@ -60,13 +60,24 @@ jobs:
           security create-keychain -p "$RUNNER_TEMP" "$KEYCHAIN"
           security set-keychain-settings -lut 3600 "$KEYCHAIN"
           security unlock-keychain -p "$RUNNER_TEMP" "$KEYCHAIN"
+          security default-keychain -s "$KEYCHAIN"
           echo "$P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
-          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" -P "$P12_PASSWORD" -T /usr/bin/codesign
-          # 保留系统钥匙串，否则 Apple WWDR 中间证书不在信任链里
-          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
-          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$RUNNER_TEMP" "$KEYCHAIN" >/dev/null
+          # -A 允许 CI 中的 codesign 直接访问私钥，避免 ACL 拦截
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" -P "$P12_PASSWORD" -A
 
           echo "$PROV" | base64 --decode > "$RUNNER_TEMP/app.mobileprovision"
+          # p12 只含 leaf 证书；从描述文件的 CMS 里取出 Apple WWDR G3 链补进钥匙串
+          openssl pkcs7 -inform DER -in "$RUNNER_TEMP/app.mobileprovision" \
+            -print_certs -out "$RUNNER_TEMP/chain.pem" 2>/dev/null || true
+          if [ -s "$RUNNER_TEMP/chain.pem" ]; then
+            security import "$RUNNER_TEMP/chain.pem" -k "$KEYCHAIN" -A
+          fi
+
+          # 保留系统钥匙串，并确认可用的签名身份
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$RUNNER_TEMP" "$KEYCHAIN" >/dev/null
+          security find-identity -v -p codesigning "$KEYCHAIN"
+
           security cms -D -i "$RUNNER_TEMP/app.mobileprovision" > "$RUNNER_TEMP/prov.plist"
           UUID=$(/usr/libexec/PlistBuddy -c 'Print :UUID' "$RUNNER_TEMP/prov.plist")
           mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
