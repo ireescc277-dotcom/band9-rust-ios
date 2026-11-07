@@ -107,6 +107,9 @@ jobs:
       - name: Archive (unsigned)
         working-directory: warframe-worldstate/ios
         run: |
+          # 不签名归档时 Xcode 不会替换 Info.plist 里的 $(PRODUCT_BUNDLE_IDENTIFIER)，
+          # 直接写入描述文件对应的实际 App ID，避免 "Archive Missing Bundle Identifier"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $BUNDLE_ID" WarframeWorldState/Info.plist
           # 让 Xcode 只负责编译，签名交给下一步手动执行
           xcodebuild \
             -project WarframeWorldState.xcodeproj \
