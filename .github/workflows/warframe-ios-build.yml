@@ -1,0 +1,62 @@
+name: Warframe iOS Simulator Build
+
+on:
+  push:
+    branches: [warframe-worldstate]
+  pull_request:
+    branches: [warframe-worldstate]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      # 根目录 HTML 是唯一数据源；prepare.py 同时解码 base64 图标
+      - name: Prepare bundle resources
+        run: python3 warframe-worldstate/ios/prepare.py
+
+      - name: Install XcodeGen
+        run: |
+          if ! command -v xcodegen >/dev/null 2>&1; then
+            brew install xcodegen
+          fi
+          xcodegen --version
+
+      - name: Generate Xcode project
+        working-directory: warframe-worldstate/ios
+        run: xcodegen generate
+
+      - name: Build for iOS Simulator
+        working-directory: warframe-worldstate/ios
+        run: |
+          xcodebuild \
+            -project WarframeWorldState.xcodeproj \
+            -scheme WarframeWorldState \
+            -configuration Release \
+            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+      - name: Package artifacts
+        run: |
+          APP=$(find "$GITHUB_WORKSPACE/warframe-worldstate/ios/build/Build/Products" -maxdepth 2 -name '*.app' -type d | head -n 1)
+          if [ -z "$APP" ]; then echo "::error::no .app produced"; exit 1; fi
+          mkdir -p out/Payload
+          ditto -c -k --sequesterRsrc --keepParent "$APP" out/WarframeWorldState-simulator.zip
+          cp -R "$APP" out/Payload/
+          (cd out && zip -qry WarframeWorldState-unsigned.ipa Payload)
+          ls -lh out
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: WarframeWorldState-iOS
+          path: |
+            out/WarframeWorldState-simulator.zip
+            out/WarframeWorldState-unsigned.ipa
+          if-no-files-found: error

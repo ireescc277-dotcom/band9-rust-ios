@@ -1,0 +1,28 @@
+name: WarframeWorldState
+options:
+  bundleIdPrefix: com.workbuddy
+  deploymentTarget:
+    iOS: "16.0"
+targets:
+  WarframeWorldState:
+    type: application
+    platform: iOS
+    sources:
+      - path: WarframeWorldState/AppDelegate.swift
+      - path: WarframeWorldState/ViewController.swift
+      - path: WarframeWorldState/Assets.xcassets
+      - path: WarframeWorldState/Resources
+        type: folder
+        buildPhase: resources
+    info:
+      path: WarframeWorldState/Info.plist
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.workbuddy.warframeworldstate
+        SWIFT_VERSION: "5.0"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        GENERATE_INFOPLIST_FILE: "NO"
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        IPHONEOS_DEPLOYMENT_TARGET: "16.0"
