@@ -5,9 +5,16 @@ name: Warframe iOS Device Build (signed)
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: warframe-ios-device-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   build:
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
