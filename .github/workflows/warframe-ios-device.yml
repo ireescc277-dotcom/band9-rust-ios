@@ -2,6 +2,10 @@ name: Warframe iOS Device Build (signed)
 
 # 手动触发。需要 Apple 签名材料，公开仓库的 macOS runner 本身免费。
 # Secrets: CERT_P12_BASE64 / CERT_PASSWORD / MOBILEPROVISION_BASE64 / TEAM_ID
+#
+# 本机这套材料是 Ad Hoc 描述文件，绑定的 App ID 为显式 ID 而非通配。
+# 因此构建时会从描述文件反推 BUNDLE_ID 与 EXPORT_METHOD，覆盖 project.yml
+# 里的 com.workbuddy.warframeworldstate；模拟器 workflow 不受影响。
 on:
   workflow_dispatch:
 
@@ -22,10 +26,11 @@ jobs:
       - name: Check signing secrets
         env:
           P12: ${{ secrets.CERT_P12_BASE64 }}
+          P12PW: ${{ secrets.CERT_PASSWORD }}
           PROV: ${{ secrets.MOBILEPROVISION_BASE64 }}
           TEAM: ${{ secrets.TEAM_ID }}
         run: |
-          if [ -z "$P12" ] || [ -z "$PROV" ] || [ -z "$TEAM" ]; then
+          if [ -z "$P12" ] || [ -z "$P12PW" ] || [ -z "$PROV" ] || [ -z "$TEAM" ]; then
             echo "::error::需要配置 Secrets: CERT_P12_BASE64, CERT_PASSWORD, MOBILEPROVISION_BASE64, TEAM_ID"
             exit 1
           fi
@@ -59,6 +64,22 @@ jobs:
           cp "$RUNNER_TEMP/app.mobileprovision" "$HOME/Library/MobileDevice/Provisioning Profiles/$UUID.mobileprovision"
           echo "PROFILE_UUID=$UUID" >> "$GITHUB_ENV"
 
+          # 描述文件决定 bundle id 与导出方式：显式 App ID 必须完全对齐，否则 archive 会失败
+          APP_ID=$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:application-identifier' "$RUNNER_TEMP/prov.plist")
+          PREFIX=$(/usr/libexec/PlistBuddy -c 'Print :ApplicationIdentifierPrefix:0' "$RUNNER_TEMP/prov.plist")
+          BUNDLE_ID="${APP_ID#"$PREFIX".}"
+          if [ -z "$BUNDLE_ID" ] || [[ "$BUNDLE_ID" == *"*"* ]]; then
+            BUNDLE_ID="com.workbuddy.warframeworldstate"
+          fi
+          if /usr/libexec/PlistBuddy -c 'Print :ProvisionedDevices' "$RUNNER_TEMP/prov.plist" >/dev/null 2>&1; then
+            EXPORT_METHOD="ad-hoc"
+          else
+            EXPORT_METHOD="app-store"
+          fi
+          echo "BUNDLE_ID=$BUNDLE_ID" >> "$GITHUB_ENV"
+          echo "EXPORT_METHOD=$EXPORT_METHOD" >> "$GITHUB_ENV"
+          echo "描述文件 App ID: $BUNDLE_ID / 导出方式: $EXPORT_METHOD"
+
       - name: Generate Xcode project
         working-directory: warframe-worldstate/ios
         run: xcodegen generate
@@ -78,6 +99,7 @@ jobs:
             CODE_SIGN_STYLE=Manual \
             DEVELOPMENT_TEAM="$TEAM" \
             PROVISIONING_PROFILE_SPECIFIER="$PROFILE_UUID" \
+            PRODUCT_BUNDLE_IDENTIFIER="$BUNDLE_ID" \
             archive
 
       - name: Export IPA
@@ -88,11 +110,11 @@ jobs:
             '<?xml version="1.0" encoding="UTF-8"?>' \
             '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' \
             '<plist version="1.0"><dict>' \
-            '<key>method</key><string>development</string>' \
+            "<key>method</key><string>$EXPORT_METHOD</string>" \
             '<key>signingStyle</key><string>manual</string>' \
             "<key>teamID</key><string>$TEAM</string>" \
             '<key>provisioningProfiles</key><dict>' \
-            "<key>com.workbuddy.warframeworldstate</key><string>$PROFILE_UUID</string>" \
+            "<key>$BUNDLE_ID</key><string>$PROFILE_UUID</string>" \
             '</dict></dict></plist>' > "$RUNNER_TEMP/ExportOptions.plist"
           xcodebuild -exportArchive \
             -archivePath "$RUNNER_TEMP/WarframeWorldState.xcarchive" \
