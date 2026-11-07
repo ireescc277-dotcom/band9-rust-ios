@@ -14,10 +14,9 @@ targets:
       - path: WarframeWorldState/Resources
         type: folder
         buildPhase: resources
-    info:
-      path: WarframeWorldState/Info.plist
     settings:
       base:
+        INFOPLIST_FILE: WarframeWorldState/Info.plist
         PRODUCT_BUNDLE_IDENTIFIER: com.workbuddy.warframeworldstate
         SWIFT_VERSION: "5.0"
         TARGETED_DEVICE_FAMILY: "1,2"
