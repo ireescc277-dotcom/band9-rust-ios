@@ -47,6 +47,8 @@ jobs:
             build
           APP_PATH="$RUNNER_TEMP/DerivedData/Build/Products/Release-iphoneos/WarframeWorldState.app"
           /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP_PATH/Info.plist"
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$APP_PATH/Info.plist"
+          /usr/libexec/PlistBuddy -c 'Print :UISupportedInterfaceOrientations' "$APP_PATH/Info.plist"
           mkdir -p "$RUNNER_TEMP/ipa/Payload" "$GITHUB_WORKSPACE/build"
           ditto "$APP_PATH" "$RUNNER_TEMP/ipa/Payload/WarframeWorldState.app"
           (cd "$RUNNER_TEMP/ipa" && /usr/bin/zip -qry \
