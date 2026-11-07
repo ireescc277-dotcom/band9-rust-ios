@@ -8,6 +8,14 @@ name: Warframe iOS Device Build (signed)
 # 里的 com.workbuddy.warframeworldstate；模拟器 workflow 不受影响。
 on:
   workflow_dispatch:
+  # 本 workflow 只存在于 warframe-worldstate 分支，默认分支没有副本，
+  # GitHub 不会注册它，导致首次 workflow_dispatch 返回 404。
+  # 这条 push 规则用于让文件自身的一次更新产生首条运行记录；
+  # 注册完成后即可正常用 workflow_dispatch 触发。
+  push:
+    branches: [warframe-worldstate]
+    paths:
+      - '.github/workflows/warframe-ios-device.yml'
 
 permissions:
   contents: read
