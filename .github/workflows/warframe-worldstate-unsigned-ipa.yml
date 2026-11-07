@@ -1,0 +1,65 @@
+name: Warframe World State unsigned IPA
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Branch containing the Warframe World State source
+        required: true
+        default: warframe-worldstate
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 40
+    steps:
+      - name: Check out requested source branch
+        uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ inputs.source_ref }}
+          persist-credentials: false
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Build and package unsigned iPhone IPA
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd warframe-worldstate
+          xcodebuild -version
+          python3 ios/prepare.py
+          xcodegen generate --spec ios/project.yml
+          xcodebuild \
+            -project ios/WarframeWorldState.xcodeproj \
+            -scheme WarframeWorldState \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$RUNNER_TEMP/WarframeWorldState.xcarchive" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY='' \
+            archive
+          mkdir -p "$RUNNER_TEMP/ipa/Payload" "$GITHUB_WORKSPACE/build"
+          ditto \
+            "$RUNNER_TEMP/WarframeWorldState.xcarchive/Products/Applications/WarframeWorldState.app" \
+            "$RUNNER_TEMP/ipa/Payload/WarframeWorldState.app"
+          (cd "$RUNNER_TEMP/ipa" && /usr/bin/zip -qry \
+            "$GITHUB_WORKSPACE/build/WarframeWorldState-unsigned.ipa" Payload)
+          (cd "$GITHUB_WORKSPACE/build" && shasum -a 256 \
+            WarframeWorldState-unsigned.ipa > WarframeWorldState-unsigned.ipa.sha256)
+
+      - name: Upload unsigned IPA
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: WarframeWorldState-unsigned-IPA
+          path: |
+            build/WarframeWorldState-unsigned.ipa
+            build/WarframeWorldState-unsigned.ipa.sha256
+          if-no-files-found: error
+          retention-days: 7
