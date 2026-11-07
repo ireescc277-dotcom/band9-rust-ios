@@ -131,7 +131,6 @@ jobs:
 
           # Xcode 为旧版 iOS 生成的散装图标会让 codesign 校验失败，去掉后再签名
           rm -rf "$APP"/AppIcon*.png
-          cp "$RUNNER_TEMP/app.mobileprovision" "$APP/embedded.mobileprovision"
 
           # entitlements 只需是描述文件的子集
           python3 -c '
@@ -151,8 +150,10 @@ jobs:
             --keychain "$KEYCHAIN" \
             --entitlements "$RUNNER_TEMP/ent.plist" \
             --timestamp=none "$APP"
-          # 不用 --verify：它会把 embedded.mobileprovision 当成嵌套代码误报未签名
-          codesign -dvv "$APP" 2>&1 | grep -E 'Identifier=|TeamIdentifier=|Signature=' || true
+          # 不用 --verify（会误报嵌套子件），但必须确认签名确实写进了 .app
+          codesign -dvv "$APP" 2>&1 | grep -qE 'TeamIdentifier=' || { echo "::error::签名未写入 .app"; exit 1; }
+          # 描述文件在签名之后放入：codesign 会把它当成嵌套代码对象
+          cp "$RUNNER_TEMP/app.mobileprovision" "$APP/embedded.mobileprovision"
 
           mkdir -p "$RUNNER_TEMP/payload/Payload" out
           cp -R "$APP" "$RUNNER_TEMP/payload/Payload/"
