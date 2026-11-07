@@ -40,15 +40,15 @@ jobs:
             -configuration Release \
             -sdk iphoneos \
             -destination 'generic/platform=iOS' \
-            -archivePath "$RUNNER_TEMP/WarframeWorldState.xcarchive" \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY='' \
-            archive
+            build
+          APP_PATH="$RUNNER_TEMP/DerivedData/Build/Products/Release-iphoneos/WarframeWorldState.app"
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP_PATH/Info.plist"
           mkdir -p "$RUNNER_TEMP/ipa/Payload" "$GITHUB_WORKSPACE/build"
-          ditto \
-            "$RUNNER_TEMP/WarframeWorldState.xcarchive/Products/Applications/WarframeWorldState.app" \
-            "$RUNNER_TEMP/ipa/Payload/WarframeWorldState.app"
+          ditto "$APP_PATH" "$RUNNER_TEMP/ipa/Payload/WarframeWorldState.app"
           (cd "$RUNNER_TEMP/ipa" && /usr/bin/zip -qry \
             "$GITHUB_WORKSPACE/build/WarframeWorldState-unsigned.ipa" Payload)
           (cd "$GITHUB_WORKSPACE/build" && shasum -a 256 \
