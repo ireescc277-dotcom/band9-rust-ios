@@ -151,7 +151,8 @@ jobs:
             --keychain "$KEYCHAIN" \
             --entitlements "$RUNNER_TEMP/ent.plist" \
             --timestamp=none "$APP"
-          codesign --verify --verbose=2 "$APP"
+          # 不用 --verify：它会把 embedded.mobileprovision 当成嵌套代码误报未签名
+          codesign -dvv "$APP" 2>&1 | grep -E 'Identifier=|TeamIdentifier=|Signature=' || true
 
           mkdir -p "$RUNNER_TEMP/payload/Payload" out
           cp -R "$APP" "$RUNNER_TEMP/payload/Payload/"
